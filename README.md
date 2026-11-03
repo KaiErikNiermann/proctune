@@ -102,13 +102,18 @@ Optional, per machine: `~/.config/proctune/config.toml` on Linux (`$XDG_CONFIG_H
 
 ## Using it in Blender
 
+Installing proctune (`pip install proctune`, or `poetry install` in a checkout) gives the `proctune` command:
+
 ```sh
-python scripts/gui.py                        # opens examples/limb/limb.json (Linux, from a checkout)
-python scripts/gui.py path/to/project.json   # any project
-python scripts/gui.py path/to/project.json --install-missing
+proctune open examples/limb/limb.json                     # check, then start Blender with the add-on and the project
+proctune open path/to/project.json --install-missing      # install what Blender's Python lacks, after saying where
+proctune open path/to/project.json -- --factory-startup   # anything after -- goes to Blender
+proctune check path/to/project.json [--json]              # only the check, no window
 ```
 
-Blender opens with the 3D view split in two, navigation kept in step (orbit, pan or zoom either one): the model as built on the left, and on the right only its surface, opaque in one colour, so the real outer shape shows (the panel's **Compare view** toggles it; a model names its surface with `surface_layers`, else its last stage's layers are used). Before starting Blender the launcher loads and builds the project with Blender's own Python and prints what is missing and where it looked; with `--install-missing` it installs what is missing, after saying where (the project's package folder, else the configured one, else Blender's). `python scripts/blender_site.py` installs what the example models and the tests need into the checkout's dev folder (`.blender-site`). The panel is in the 3D view's sidebar, tab "proctune":
+Blender gets only the `proctune` package on its path, copied into proctune's cache folder (`~/.cache/proctune` on Linux, `%LOCALAPPDATA%\proctune` on Windows): never the rest of your environment, whose compiled packages would be for another Python. The copy is refreshed whenever the package changes, so an editable install picks up edits on the next `proctune open`.
+
+Blender opens with the 3D view split in two, navigation kept in step (orbit, pan or zoom either one): the model as built on the left, and on the right only its surface, opaque in one colour, so the real outer shape shows (the panel's **Compare view** toggles it; a model names its surface with `surface_layers`, else its last stage's layers are used). Before starting Blender, `proctune open` loads and builds the project with Blender's own Python and prints what is missing and where it looked; with `--install-missing` it installs what is missing, after saying where (the project's package folder, else the configured one, else Blender's). For development, `python scripts/blender_site.py` installs what the example models and the tests need into the checkout's dev folder (`.blender-site`), which the tests use. The panel is in the 3D view's sidebar, tab "proctune":
 - sliders for every parameter, grouped as the parameter dataclasses are, and for every composite;
 - a curve widget for every curve parameter;
 - layer visibility toggles;
@@ -163,6 +168,10 @@ Medians on a Ryzen 9 9900X3D with Blender 5.2.3, from `poetry run pytest benchma
 
 - Handles with composites active: a handle writes base parameters through the model's `drag`, which sees the base parameters, so with a composite applied the handle and the drawn model can disagree until the composite is back at its default.
 - Sliders and curve widgets are driven through their data in the end-to-end test, not by clicking them: Blender has no API for a button's position on screen. For the panel screenshot the driver shows the panel in the sidebar tab that is open, since simulated Ctrl+wheel switched tabs only once.
+
+## Planned
+
+- **A real Blender extension:** proctune installed once into Blender and listed under Add-ons, with its packages bundled as wheels, so it works without a launcher. It needs every internal import made relative first, since Blender loads extensions under its own package name.
 
 ## Licence
 
