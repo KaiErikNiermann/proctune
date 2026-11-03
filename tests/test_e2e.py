@@ -46,11 +46,18 @@ def run(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         pytest.fail(f"no results (exit {proc.returncode}):\n{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}")
     data: dict[str, Any] = json.loads(results.read_text())
     data["dir"] = str(out)
+    data["stderr"] = proc.stderr
     return data
 
 
 def test_driver_ran_to_the_end(run: dict[str, Any]) -> None:
     assert not run["error"], run["error"]
+
+
+def test_blender_reported_no_error_from_proctune(run: dict[str, Any]) -> None:
+    """Exceptions in handlers, timers and panel drawing do not stop Blender; they only print a traceback."""
+    blocks = [b for b in str(run["stderr"]).split("Traceback (most recent call last):")[1:] if "proctune" in b]
+    assert not blocks, blocks[0][:3000]
 
 
 CHECKS = [
@@ -70,7 +77,15 @@ CHECKS = [
     "viewport redraws in sculpt mode",
     "dragging the wrist bends the joint",
     "slider shows the dragged value",
+    "turning the lower bone bends the joint",
+    "a bone move is a parameter change, not a tweak",
+    "stretching the upper bone lengthens it",
+    "the slider follows the stretched bone",
+    "a curve edit rebuilds the model",
+    "arrow keys step the timeline",
+    "the model grows along the timeline",
     "project saves with its sculpt",
+    "project saves the keyframes as a track",
 ]
 
 

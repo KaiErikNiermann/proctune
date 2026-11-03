@@ -18,6 +18,7 @@ all keyboard input.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 import time
@@ -284,9 +285,125 @@ def scenario() -> Iterator[None]:  # noqa: PLR0915 -- one linear story, step by 
     )
     screenshot("handle")
 
+    yield from bone_moves(s)
+    yield from curve_and_timeline(s)
+
     out = OUT / "saved.json"
     addon.save_project(out)
     R.check("project saves with its sculpt", out.exists() and out.with_suffix(".npz").exists())
+    saved = json.loads(out.read_text())
+    R.check("project saves the keyframes as a track", "growth.stage" in saved.get("tracks", {}))
+
+
+def bone_moves(s: Any) -> Iterator[None]:
+    """R turns the lower bone about the view axis (the bend axis in this top view); S Y stretches the upper bone."""
+    lower = bpy.data.objects["lower bone"]
+    select_only(lower.name)
+    joint = to_window(limb_chain(s).joint)
+    tip = to_window(limb_chain(s).tip)
+    angle_before = s.base.joint_deg
+    yield from move_to(tip)
+    yield from key("R", tip)
+    # rotate the mouse about the joint (the pivot is the object's origin, the joint) by about 20 degrees
+    for k in range(1, 9):
+        a = math.radians(-2.5 * k)
+        dx, dy = tip[0] - joint[0], tip[1] - joint[1]
+        yield from move_to(
+            (
+                joint[0] + round(dx * math.cos(a) - dy * math.sin(a)),
+                joint[1] + round(dx * math.sin(a) + dy * math.cos(a)),
+            )
+        )
+    yield from key("LEFTMOUSE", tip)
+    yield from settle()
+    R.check(
+        "turning the lower bone bends the joint",
+        abs(s.base.joint_deg - angle_before) > 5,
+        f"{angle_before:.1f} -> {s.base.joint_deg:.1f} deg",
+    )
+    R.check("a bone move is a parameter change, not a tweak", "lower bone" not in s.edits)
+    upper = bpy.data.objects["upper bone"]
+    select_only(upper.name)
+    length_before = s.base.upper.length
+    root, elbow = to_window(limb_chain(s).root), to_window(limb_chain(s).joint)
+    yield from move_to(elbow)
+    yield from key("S", elbow)
+    yield from key("Y", elbow)
+    for k in range(1, 9):
+        yield from move_to((elbow[0] + (elbow[0] - root[0]) * k // 40, elbow[1] + (elbow[1] - root[1]) * k // 40))
+    yield from key("LEFTMOUSE", elbow)
+    yield from settle()
+    R.check(
+        "stretching the upper bone lengthens it",
+        s.base.upper.length > length_before * 1.05,
+        f"{length_before:.3f} -> {s.base.upper.length:.3f} m",
+    )
+    R.check(
+        "the slider follows the stretched bone",
+        abs(bpy.context.scene.proctune_params.upper__length - s.base.upper.length) < 1e-4,
+    )
+    screenshot("bones-moved")
+
+
+def limb_chain(s: Any) -> Any:
+    import limb  # noqa: PLC0415  # the project's model module, importable once the project is open
+
+    return limb.chain(limb.develop(s.effective))
+
+
+def curve_and_timeline(s: Any) -> Iterator[None]:
+    from proctune.blender import curves  # noqa: PLC0415
+
+    # a curve widget edited (through its points: no API gives the widget's screen position); the add-on's poll timer
+    # must notice and rebuild by itself
+    before = verts("lower fat")
+    curves.node("fat__lower__curve").mapping.curves[0].points[1].location = (0.3, 0.8)
+    t = time.time()
+    while abs(s.base.fat.lower.curve.points[1][0] - 0.3) > 1e-6 and time.time() - t < SETTLE_S:
+        yield
+    yield from settle()
+    R.check("a curve edit rebuilds the model", float(np.abs(verts("lower fat") - before).max()) > 1e-3)
+    # the panel with its curve widgets
+    area, _, _ = view3d()
+    space = cast(bpy.types.SpaceView3D, area.spaces[0])
+    space.show_region_ui = True
+    for _ in range(4):
+        yield
+    ui = next(r for r in area.regions if r.type == "UI")
+    over = (ui.x + ui.width // 2, ui.y + ui.height // 2)
+    yield from move_to(over)
+    # show the panel in the tab that is open: simulated Ctrl+wheel switches the sidebar's tab once and then no more
+    # (LOG.md), and Python cannot set the tab; the panel's draw code is what this step exercises
+    panel = addon.PROCTUNE_PT_panel
+    category = panel.bl_category
+    bpy.utils.unregister_class(panel)
+    panel.bl_category = ui.active_panel_category
+    bpy.utils.register_class(panel)
+    for _ in range(6):
+        yield
+    screenshot("panel")
+    bpy.utils.unregister_class(panel)
+    panel.bl_category = category
+    bpy.utils.register_class(panel)
+
+    # keyframes on growth, then the right arrow steps frames like a person would; the frame handler rebuilds
+    sc = bpy.context.scene
+    sc.frame_set(1)
+    sc.proctune_params.growth__stage = 0.0
+    sc.keyframe_insert("proctune_params.growth__stage", frame=1)
+    sc.proctune_params.growth__stage = 1.0
+    sc.keyframe_insert("proctune_params.growth__stage", frame=11)
+    sc.frame_set(1)
+    yield from settle()
+    small = float(verts("upper bone")[:, 1].max())
+    centre = to_window(verts("upper bone").mean(axis=0))
+    for _ in range(10):
+        yield from key("RIGHT_ARROW", centre)
+    yield from settle()
+    big = float(verts("upper bone")[:, 1].max())
+    R.check("arrow keys step the timeline", sc.frame_current == 11, f"frame {sc.frame_current}")
+    R.check("the model grows along the timeline", big > small * 2.5, f"bone top {small:.3f} -> {big:.3f} m")
+    screenshot("grown")
 
 
 def _changed_pixels(a: str, b: str) -> int:
