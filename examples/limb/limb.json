@@ -25,6 +25,84 @@
       "insertion": 0.04,
       "lift": 0.02
     },
+    "fat": {
+      "adiposity": 0.4,
+      "upper": {
+        "thickness": 0.012,
+        "centre": 0.5,
+        "width": 0.22,
+        "around_deg": 180.0,
+        "curve": {
+          "points": [
+            [
+              0.0,
+              0.1
+            ],
+            [
+              0.5,
+              0.5
+            ],
+            [
+              1.0,
+              1.0
+            ]
+          ],
+          "lo": 0.0,
+          "hi": 1.0
+        }
+      },
+      "lower": {
+        "thickness": 0.009,
+        "centre": 0.35,
+        "width": 0.22,
+        "around_deg": 180.0,
+        "curve": {
+          "points": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.6,
+              0.12
+            ],
+            [
+              1.0,
+              1.0
+            ]
+          ],
+          "lo": 0.0,
+          "hi": 1.0
+        }
+      }
+    },
+    "growth": {
+      "stage": 1.0,
+      "curve": {
+        "points": [
+          [
+            0.0,
+            0.3
+          ],
+          [
+            0.25,
+            0.62
+          ],
+          [
+            0.6,
+            0.92
+          ],
+          [
+            1.0,
+            1.0
+          ]
+        ],
+        "lo": 0.0,
+        "hi": 1.2
+      },
+      "muscle_exponent": 1.4,
+      "fat_exponent": 1.0
+    },
     "skin": {
       "thickness": 0.004,
       "smoothing": 2.0,
@@ -35,5 +113,6 @@
     "flex": 0.0,
     "size": 0.0
   },
+  "tracks": {},
   "tweaks": {}
 }

@@ -9,8 +9,17 @@ swept over both (surface).
   point of the bones and muscle (resolved, so sculpts show through) in that direction, smoothed, plus a thickness.
   Every skin vertex has its own frame (out, along, around the limb), so a skin sculpt follows the bend.
 
+- Fat: a deposit along each bone, its thickness set by overall adiposity through its own curve (one fills in early
+  and mildly, the other late and steeply).
+
+Growth: `growth.stage` (0 to 1, think age) drives the overall size through a free-form growth curve $s$; bones scale
+by $s$, the muscle's belly by $s^{b_m}$ and the fat by $s^{b_f}$ (allometric exponents: above 1 grows faster than the
+bones). All parameters describe the grown limb; `develop` gives the limb at its stage.
+
 Composites: `flex` bends the joint and bunches the muscle; `size` scales the whole limb. Handles: the elbow (sets
-the upper bone's length) and the wrist (sets the joint angle and the lower bone's length).
+the upper bone's length) and the wrist (sets the joint angle and the lower bone's length). Moving a bone by hand is a
+parameter change too (`LimbModel.bind`): scaling it along itself sets its length, across itself its radius, and
+turning the lower bone about the joint sets the joint's angle.
 """
 
 from __future__ import annotations
@@ -26,7 +35,8 @@ from numpy.typing import NDArray
 from scipy import interpolate, ndimage
 from scipy.spatial import KDTree
 
-from proctune.core import Composite, Element, Frame, Handle, Range, Resolved, Stage
+from proctune.core import Composite, Curve, Element, Frame, Handle, Range, Resolved, Stage, allometric
+from proctune.core.params import clamp
 
 type F64 = NDArray[np.float64]
 
@@ -63,12 +73,65 @@ class Skin:
 
 
 @dataclass(frozen=True)
+class FatDeposit:
+    thickness: Annotated[float, Range(0.0, 0.03, 0.0005, "m", "Thickness at full adiposity")] = 0.012
+    centre: Annotated[float, Range(0.1, 0.9, 0.01, "", "Where along the bone it is thickest")] = 0.5
+    width: Annotated[float, Range(0.05, 0.5, 0.01, "", "Spread along the bone (sigma, share of its length)")] = 0.22
+    around_deg: Annotated[float, Range(-180.0, 180.0, 1.0, "deg", "Side of the bone (0: the muscle's side)")] = 180.0
+    curve: Curve = field(default_factory=lambda: Curve.through((0.0, 0.1), (0.5, 0.5), (1.0, 1.0)))
+    """Thickness share against adiposity"""
+
+
+@dataclass(frozen=True)
+class Fat:
+    adiposity: Annotated[float, Range(0.0, 1.0, 0.01, "", "Overall body fat, the driver of every deposit's curve")] = (
+        0.4
+    )
+    upper: FatDeposit = field(default_factory=FatDeposit)
+    lower: FatDeposit = field(
+        default_factory=lambda: FatDeposit(
+            thickness=0.009, centre=0.35, curve=Curve.through((0.0, 0.0), (0.6, 0.12), (1.0, 1.0))
+        )
+    )
+
+
+@dataclass(frozen=True)
+class Growth:
+    stage: Annotated[float, Range(0.0, 1.0, 0.01, "", "Growth stage, 1 is fully grown (the stated sizes)")] = 1.0
+    curve: Curve = field(
+        default_factory=lambda: Curve.through((0.0, 0.3), (0.25, 0.62), (0.6, 0.92), (1.0, 1.0), lo=0.0, hi=1.2)
+    )
+    """Overall size against stage: fast early, then a plateau"""
+    muscle_exponent: Annotated[float, Range(0.5, 2.5, 0.05, "", "Muscle girth grows as size^b")] = 1.4
+    fat_exponent: Annotated[float, Range(0.5, 2.5, 0.05, "", "Fat grows as size^b")] = 1.0
+
+
+@dataclass(frozen=True)
 class Limb:
     upper: Bone = field(default_factory=Bone)
     lower: Bone = field(default_factory=lambda: Bone(length=0.26, radius=0.013))
     joint_deg: Annotated[float, Range(0.0, 150.0, 1.0, "deg", "Flexion at the joint")] = 15.0
     muscle: Muscle = field(default_factory=Muscle)
+    fat: Fat = field(default_factory=Fat)
+    growth: Growth = field(default_factory=Growth)
     skin: Skin = field(default_factory=Skin)
+
+
+def size_factor(p: Limb) -> float:
+    return p.growth.curve(p.growth.stage)
+
+
+def develop(p: Limb) -> Limb:
+    """The limb at its growth stage: bones scaled by the growth curve's size, the muscle allometrically."""
+    s = size_factor(p)
+    mg = allometric(s, p.growth.muscle_exponent)
+
+    def bone(b: Bone) -> Bone:
+        return replace(b, length=b.length * s, radius=b.radius * s)
+
+    m = p.muscle
+    muscle = replace(m, belly=m.belly * mg, tendon=m.tendon * s, insertion=m.insertion * s, lift=m.lift * s)
+    return replace(p, upper=bone(p.upper), lower=bone(p.lower), muscle=muscle)
 
 
 # ------------------------------------------------------------------------------------------------- geometry
@@ -123,8 +186,9 @@ def _bone(name: str, origin: F64, along: F64, b: Bone) -> Element:
 
 
 def bones(p: Limb, _: Mapping[str, Resolved]) -> tuple[Element, ...]:
-    c = chain(p)
-    return (_bone("upper bone", c.root, c.d1, p.upper), _bone("lower bone", c.joint, c.d2, p.lower))
+    q = develop(p)
+    c = chain(q)
+    return (_bone("upper bone", c.root, c.d1, q.upper), _bone("lower bone", c.joint, c.d2, q.lower))
 
 
 def muscle_ends(p: Limb) -> tuple[F64, F64]:
@@ -136,17 +200,55 @@ def muscle_ends(p: Limb) -> tuple[F64, F64]:
     return start, end
 
 
-def muscles(p: Limb, _: Mapping[str, Resolved]) -> tuple[Element, ...]:
-    m = p.muscle
-    start, end = muscle_ends(p)
-    t = np.linspace(0.0, 1.0, RINGS)
-    r = m.tendon + m.belly * np.exp(-((t - m.centre) ** 2) / (2 * m.width**2)) * np.sqrt(np.sin(np.pi * t).clip(0.0))
-    girth = m.tendon + m.belly
-    profile = r / girth
+@dataclass(frozen=True)
+class Bell:
+    r"""A bell-shaped radius profile along $t \in [0, 1]$: $r_t + b\,e^{-(t-c)^2/2w^2}\sqrt{\sin \pi t}$."""
+
+    tip: float
+    peak: float
+    centre: float
+    width: float
+
+    def radii(self, t: F64) -> F64:
+        bell = np.exp(-((t - self.centre) ** 2) / (2 * self.width**2)) * np.sqrt(np.sin(np.pi * t).clip(0.0))
+        return self.tip + self.peak * bell
+
+
+def belly(name: str, layer: str, start: F64, end: F64, shape: Bell) -> Element:
+    """A solid of revolution from `start` to `end` with a bell-shaped profile."""
+    girth = max(shape.tip + shape.peak, 1e-6)
+    profile = shape.radii(np.linspace(0.0, 1.0, RINGS)) / girth
     profile[[0, -1]] = 0.0
     local, faces = revolution(profile)
     scale = np.array([girth, float(np.linalg.norm(end - start)), girth])
-    return (Element("muscle", "muscle", _frame(start, end - start, scale), local, faces),)
+    return Element(name, layer, _frame(start, end - start, scale), local, faces)
+
+
+def muscles(p: Limb, _: Mapping[str, Resolved]) -> tuple[Element, ...]:
+    q = develop(p)
+    m = q.muscle
+    start, end = muscle_ends(q)
+    return (belly("muscle", "muscle", start, end, Bell(m.tendon, m.belly, m.centre, m.width)),)
+
+
+def fat(p: Limb, _: Mapping[str, Resolved]) -> tuple[Element, ...]:
+    """A deposit along each bone, on its side, as thick as its curve says at this adiposity."""
+    q = develop(p)
+    c = chain(q)
+    grown = allometric(size_factor(p), p.growth.fat_exponent)
+    out: list[Element] = []
+    for name, origin, d, b, dep in (
+        ("upper fat", c.root, c.d1, q.upper, p.fat.upper),
+        ("lower fat", c.joint, c.d2, q.lower, p.fat.lower),
+    ):
+        thick = dep.thickness * grown * max(dep.curve(p.fat.adiposity), 0.0)
+        axes = _frame(origin, d, np.ones(3)).axes
+        a = math.radians(dep.around_deg)
+        side = axes[:, 0] * math.cos(a) + axes[:, 2] * math.sin(a)
+        offset = side * (b.radius + 0.4 * thick)
+        start, end = origin + d * b.length * 0.05 + offset, origin + d * b.length * 0.95 + offset
+        out.append(belly(name, "fat", start, end, Bell(0.0005, thick, dep.centre, dep.width)))
+    return tuple(out)
 
 
 def centreline(p: Limb, n: int = SKIN_RINGS) -> tuple[F64, F64]:
@@ -161,7 +263,7 @@ def centreline(p: Limb, n: int = SKIN_RINGS) -> tuple[F64, F64]:
 
 
 def skin(p: Limb, done: Mapping[str, Resolved]) -> tuple[Element, ...]:
-    pos, tan = centreline(p)
+    pos, tan = centreline(develop(p))
     out = np.cross(tan, BEND_AXIS)  # in the bend plane, towards +x at rest
     around = np.cross(out, tan)
     # every tissue vertex to its nearest centreline point, then to an angle and a distance in that ring's plane
@@ -244,17 +346,45 @@ def size(p: Limb, k: float) -> Limb:
 
 
 def _drag_elbow(p: Limb, w: F64) -> Limb:
-    c = chain(p)
-    return replace(p, upper=replace(p.upper, length=float(np.clip((w - c.root) @ c.d1, 0.1, 0.6))))
+    """The elbow at `w`: the upper bone's (grown) length is its projection on the bone, over the growth size."""
+    c = chain(develop(p))
+    length = float((w - c.root) @ c.d1) / size_factor(p)
+    return replace(p, upper=replace(p.upper, length=clamp(p.upper, "length", length)))
 
 
 def _drag_wrist(p: Limb, w: F64) -> Limb:
-    c = chain(p)
+    c = chain(develop(p))
     v = w - c.joint
     v -= BEND_AXIS * float(v @ BEND_AXIS)
     angle = math.degrees(math.atan2(float(v @ np.array([1.0, 0.0, 0.0])), float(v @ c.d1)))
-    lower = replace(p.lower, length=float(np.clip(np.linalg.norm(v), 0.1, 0.6)))
-    return replace(p, joint_deg=float(np.clip(angle, 0.0, 150.0)), lower=lower)
+    lower = replace(p.lower, length=clamp(p.lower, "length", float(np.linalg.norm(v)) / size_factor(p)))
+    return replace(p, joint_deg=clamp(p, "joint_deg", angle), lower=lower)
+
+
+def _bend_deg(before: F64, after: F64) -> float:
+    """How far `before` turned into `after` about the bend axis, in the joint's flexion sense (towards +x)."""
+    return -math.degrees(math.atan2(float(np.cross(before, after) @ BEND_AXIS), float(before @ after)))
+
+
+def bind(p: Limb, element: str, matrix: F64) -> Limb | None:
+    """A bone moved by hand as parameters: scaled along itself (its length), across (its radius), and for the lower
+    bone, turned about the joint (the joint's angle). Moving a bone sideways has no parameter; it springs back."""
+    if element not in ("upper bone", "lower bone"):
+        return None
+    m3 = matrix[:3, :3]
+    upper = element == "upper bone"
+    c = chain(develop(p))
+    d = c.d1 if upper else c.d2
+    across = _frame(c.root, d, np.ones(3)).axes[:, 0]
+    b = p.upper if upper else p.lower
+    b = replace(
+        b,
+        length=clamp(b, "length", b.length * float(np.linalg.norm(m3 @ d))),
+        radius=clamp(b, "radius", b.radius * float(np.linalg.norm(m3 @ across))),
+    )
+    if upper:
+        return replace(p, upper=b)
+    return replace(p, lower=b, joint_deg=clamp(p, "joint_deg", p.joint_deg + _bend_deg(d, m3 @ d)))
 
 
 @dataclass(frozen=True)
@@ -266,7 +396,7 @@ class LimbModel:
 
     @property
     def stages(self) -> tuple[Stage[Limb], ...]:
-        return (Stage("scaffold", bones), Stage("structure", muscles), Stage("surface", skin))
+        return (Stage("scaffold", bones), Stage("structure", muscles), Stage("fat", fat), Stage("surface", skin))
 
     @property
     def composites(self) -> tuple[Composite[Limb], ...]:
@@ -277,9 +407,12 @@ class LimbModel:
 
     def handles(self, p: Limb) -> tuple[Handle[Limb], ...]:
         return (
-            Handle("elbow", lambda q: chain(q).joint, _drag_elbow, (("upper", "length"),)),
-            Handle("wrist", lambda q: chain(q).tip, _drag_wrist, (("joint_deg",), ("lower", "length"))),
+            Handle("elbow", lambda q: chain(develop(q)).joint, _drag_elbow, (("upper", "length"),)),
+            Handle("wrist", lambda q: chain(develop(q)).tip, _drag_wrist, (("joint_deg",), ("lower", "length"))),
         )
+
+    def bind(self, p: Limb, element: str, matrix: F64) -> Limb | None:
+        return bind(p, element, matrix)
 
 
 MODEL = LimbModel()

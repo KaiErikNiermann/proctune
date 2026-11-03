@@ -42,7 +42,9 @@ def test_specs_cover_every_value_with_its_range() -> None:
     assert sp["upper__length"].default == 0.30
     assert sp["upper__length"].range is not None and sp["upper__length"].range.unit == "m"
     assert sp["joint_deg"].kind == "float"
-    assert len(sp) == 3 + 3 + 1 + 7 + 3
+    # bones, joint, muscle, fat (adiposity, two deposits with a curve each), growth (stage, curve, exponents), skin
+    assert len(sp) == 3 + 3 + 1 + 7 + (1 + 2 * 5) + 4 + 3
+    assert sp["fat__lower__curve"].kind == "curve"
 
 
 def test_replace_and_round_trip() -> None:
