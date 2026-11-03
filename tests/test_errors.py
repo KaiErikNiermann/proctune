@@ -392,24 +392,33 @@ PREFLIGHT_BLENDER = config.load().blender
 
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which(PREFLIGHT_BLENDER) is None, reason="needs blender (Linux)")
-def test_the_launcher_reports_and_installs_nothing_unless_asked(tmp_path: Path) -> None:
+def test_check_reports_and_installs_nothing_unless_asked(tmp_path: Path) -> None:
+    """`proctune check` builds the project in Blender's own Python and reports; it installs nothing."""
     (tmp_path / "needs_late_pkg_model.py").write_text("import pkg_preflight_missing_xyz\nMODEL = None\n")
     project = tmp_path / "p.json"
     project.write_text(
         '{"format": 2, "model": "needs_late_pkg_model:MODEL", "import_paths": ["."], "package_paths": ["pkgs"]}'
     )
     (tmp_path / "pkgs").mkdir()
-    root = Path(__file__).resolve().parents[1]
-    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
-    script = str(root / "scripts" / "preflight.py")
     r = subprocess.run(
-        [PREFLIGHT_BLENDER, "-b", "--factory-startup", "--python", script, "--", str(project)],
-        env=env, capture_output=True, text=True, timeout=120, check=False,
+        [sys.executable, "-m", "proctune.cli", "check", str(project), "--json"],
+        capture_output=True, text=True, timeout=180, check=False,
     )  # fmt: skip
-    last = next(line for line in reversed(r.stdout.splitlines()) if line.startswith("PROCTUNE_PREFLIGHT "))
-    report = json.loads(last.removeprefix("PROCTUNE_PREFLIGHT "))
+    assert r.returncode == 1, r.stderr
+    report = json.loads(r.stdout.strip().splitlines()[-1])
     assert report["missing"] == ["pkg_preflight_missing_xyz"]
     assert report["installed"] == []
-    assert "looked in" in r.stdout
-    assert f"{tmp_path / 'pkgs'}" in r.stdout  # the project's own package folder is among the folders searched
+    assert any(line.startswith("looked in") for line in report["environment"])
+    assert any(str(tmp_path / "pkgs") in line for line in report["environment"])  # the project's folder was searched
     assert list((tmp_path / "pkgs").iterdir()) == []
+
+
+def test_the_staged_package_is_proctune_alone() -> None:
+    """What `proctune open` puts on Blender's path holds the proctune package and nothing else from this
+    environment (no numpy compiled for another Python)."""
+    from proctune.stage import stage  # noqa: PLC0415
+
+    root = stage()
+    assert sorted(p.name for p in root.iterdir() if not p.name.startswith(".")) == ["proctune"]
+    assert (root / "proctune" / "blender" / "launch.py").is_file()
+    assert stage() == root  # unchanged package: not copied again
