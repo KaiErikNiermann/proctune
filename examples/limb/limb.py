@@ -361,6 +361,12 @@ def _drag_wrist(p: Limb, w: F64) -> Limb:
     return replace(p, joint_deg=clamp(p, "joint_deg", angle), lower=lower)
 
 
+def _turn_elbow(p: Limb, rotation: F64) -> Limb:
+    """Turning the elbow's handle about the bend axis bends the joint by as much (the lower bone turns with it)."""
+    d2 = chain(develop(p)).d2
+    return replace(p, joint_deg=clamp(p, "joint_deg", p.joint_deg + _bend_deg(d2, rotation @ d2)))
+
+
 def _bend_deg(before: F64, after: F64) -> float:
     """How far `before` turned into `after` about the bend axis, in the joint's flexion sense (towards +x)."""
     return -math.degrees(math.atan2(float(np.cross(before, after) @ BEND_AXIS), float(before @ after)))
@@ -407,7 +413,13 @@ class LimbModel:
 
     def handles(self, p: Limb) -> tuple[Handle[Limb], ...]:
         return (
-            Handle("elbow", lambda q: chain(develop(q)).joint, _drag_elbow, (("upper", "length"),)),
+            Handle(
+                "elbow",
+                lambda q: chain(develop(q)).joint,
+                _drag_elbow,
+                (("upper", "length"), ("joint_deg",)),
+                _turn_elbow,
+            ),
             Handle("wrist", lambda q: chain(develop(q)).tip, _drag_wrist, (("joint_deg",), ("lower", "length"))),
         )
 

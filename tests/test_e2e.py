@@ -89,6 +89,8 @@ CHECKS = [
     "viewport redraws in sculpt mode",
     "dragging the wrist bends the joint",
     "slider shows the dragged value",
+    "turning the elbow handle bends the joint once",
+    "the elbow handle stands upright again",
     "turning the lower bone bends the joint",
     "a bone move is a parameter change, not a tweak",
     "stretching the upper bone lengthens it",

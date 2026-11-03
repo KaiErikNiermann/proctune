@@ -50,6 +50,9 @@ class Written:
     frames: dict[str, F64] = field(default_factory=dict[str, F64])
     """Where the frame empty was put (4x4, world); identity for unparented elements"""
     handles: dict[str, F64] = field(default_factory=dict[str, F64])
+    handle_turns: dict[str, F64] = field(default_factory=dict[str, F64])
+    """Each handle's rotation already applied (3x3): a turn is relative, and a rotation in progress is applied in
+    steps, so only the change since the last step counts"""
 
 
 def _collection(name: str, parent: bpy.types.Collection) -> bpy.types.Collection:
@@ -198,11 +201,29 @@ def write_handles(session: Session[object], written: Written, skip: frozenset[st
             obj.show_in_front = True
             obj[HANDLE_KEY] = h.name
             coll.objects.link(obj)
+        # a handle that means nothing when turned or scaled is locked against it, so R visibly does nothing
+        obj.lock_rotation = (h.turn is None,) * 3
+        obj.lock_scale = (True, True, True)
         if h.name in skip:
             continue
         pos = h.position(session.effective)
         obj.location = pos.tolist()
+        obj.rotation_euler = (0.0, 0.0, 0.0)
         written.handles[h.name] = np.asarray(pos, np.float64).copy()
+        written.handle_turns[h.name] = np.eye(3)
+
+
+def turned_handles(written: Written) -> dict[str, F64]:
+    """Handles turned since their rotation was last applied: name to that further rotation (3x3, world). Records
+    the rotation as applied."""
+    out: dict[str, F64] = {}
+    for name, obj in handle_objects().items():
+        now = np.array(obj.rotation_euler.to_matrix(), np.float64)
+        done = written.handle_turns.get(name, np.eye(3))
+        if not np.allclose(now, done, atol=1e-6):
+            out[name] = now @ done.T
+            written.handle_turns[name] = now
+    return out
 
 
 def moved_handles(written: Written) -> dict[str, F64]:

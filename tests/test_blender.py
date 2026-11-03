@@ -271,3 +271,40 @@ def test_reset_puts_one_parameter_back_to_its_default(project: None) -> None:
     assert s.base.upper.length == pytest.approx(0.30)
     assert s.base.joint_deg == pytest.approx(40.0)  # the others stay
     assert props.upper__length == pytest.approx(0.30)
+
+
+def test_rotating_the_elbow_handle_bends_the_joint(project: None) -> None:
+    import math  # noqa: PLC0415
+
+    h = bpy.data.objects["handle: elbow"]
+    h.rotation_euler = (0.0, 0.0, math.radians(-20.0))
+    addon.rebuild()
+    s = addon.STATE.session
+    assert s is not None
+    assert s.base.joint_deg == pytest.approx(35.0, abs=1e-4)
+    assert tuple(h.rotation_euler) == pytest.approx((0.0, 0.0, 0.0))  # upright again, the slider shows the result
+    assert bpy.context.scene.proctune_params.joint_deg == pytest.approx(35.0, abs=1e-4)
+
+
+def test_handles_without_a_turn_are_locked(project: None) -> None:
+    w = bpy.data.objects["handle: wrist"]
+    assert tuple(w.lock_rotation) == (True, True, True)
+    assert tuple(bpy.data.objects["handle: elbow"].lock_rotation) == (False, False, False)
+
+
+def test_a_turn_in_progress_is_not_applied_twice(project: None) -> None:
+    """Rebuilds during a rotation (the handle being dragged is not reset) apply only what was turned since."""
+    import math  # noqa: PLC0415
+
+    h = bpy.data.objects["handle: elbow"]
+    addon.STATE.dragged = frozenset({"elbow"})
+    h.rotation_euler = (0.0, 0.0, math.radians(-10.0))
+    addon.rebuild()
+    addon.STATE.dragged = frozenset({"elbow"})
+    addon.rebuild()  # same rotation, still in progress: nothing more
+    addon.STATE.dragged = frozenset({"elbow"})
+    h.rotation_euler = (0.0, 0.0, math.radians(-25.0))
+    addon.rebuild()
+    s = addon.STATE.session
+    assert s is not None
+    assert s.base.joint_deg == pytest.approx(40.0, abs=1e-4)

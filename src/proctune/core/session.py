@@ -106,10 +106,22 @@ class Session[T]:
         """The handles, placed at the effective parameters (where the model is drawn)."""
         return self.model.handles(self.effective)
 
+    def _handle(self, name: str) -> Handle[T]:
+        h = next((h for h in self.model.handles(self.base) if h.name == name), None)
+        if h is None:
+            raise EditError(f"no handle {name!r}", "the model's handles changed: rebuild")
+        return h
+
     def drag(self, handle: str, world: F64) -> None:
         """Move a handle; it sets base parameters (composites stay applied on top)."""
-        h = next(h for h in self.model.handles(self.base) if h.name == handle)
-        self.base = h.drag(self.base, world)
+        self.base = self._handle(handle).drag(self.base, world)
+
+    def turn(self, handle: str, rotation: F64) -> None:
+        """Turn a handle by a world-space rotation (3x3); it sets base parameters."""
+        h = self._handle(handle)
+        if h.turn is None:
+            raise EditError(f"handle {handle!r} cannot be turned", "move it instead; its rotation does nothing")
+        self.base = h.turn(self.base, rotation)
 
     # ------------------------------------------------------------------------------------------- evaluation
 

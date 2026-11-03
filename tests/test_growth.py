@@ -169,3 +169,16 @@ def test_tracks_round_trip(tmp_path: Path) -> None:
     s.save(tmp_path / "p.json")
     t = Session.load(tmp_path / "p.json")
     assert t.tracks == s.tracks
+
+
+def test_turning_the_elbow_handle_bends_the_joint() -> None:
+    s = _session()
+    s.turn("elbow", _rot_z(-20.0)[:3, :3])  # towards +x: flexion
+    assert s.base.joint_deg == pytest.approx(35.0)
+
+
+def test_a_handle_without_a_turn_says_so() -> None:
+    from proctune.errors import EditError  # noqa: PLC0415
+
+    with pytest.raises(EditError, match="cannot be turned"):
+        _session().turn("wrist", _rot_z(10.0)[:3, :3])

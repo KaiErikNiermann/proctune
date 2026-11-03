@@ -289,6 +289,7 @@ def scenario() -> Iterator[None]:  # noqa: PLR0915 -- one linear story, step by 
     )
     screenshot("handle")
 
+    yield from turn_elbow_handle(s)
     yield from bone_moves(s)
     yield from skin_scale(s)
     yield from curve_and_timeline(s)
@@ -298,6 +299,30 @@ def scenario() -> Iterator[None]:  # noqa: PLR0915 -- one linear story, step by 
     R.check("project saves with its sculpt", out.exists() and out.with_suffix(".npz").exists())
     saved = json.loads(out.read_text())
     R.check("project saves the keyframes as a track", "growth.stage" in saved.get("tracks", {}))
+
+
+def turn_elbow_handle(s: Any) -> Iterator[None]:
+    """R on the elbow's handle, turned about 20 degrees by the mouse: the joint bends by about as much, once."""
+    h = bpy.data.objects["handle: elbow"]
+    select_only(h.name)
+    centre = to_window(h.location)
+    start = (centre[0] + 60, centre[1])
+    before = s.base.joint_deg
+    yield from move_to(start)
+    yield from key("R", start)
+    for k in range(1, 9):
+        a = math.radians(-2.5 * k)
+        yield from move_to((centre[0] + round(60 * math.cos(a)), centre[1] + round(60 * math.sin(a))))
+    yield from key("LEFTMOUSE", start)
+    yield from settle()
+    bent = s.base.joint_deg - before
+    R.check(
+        "turning the elbow handle bends the joint once", 12 < bent < 28, f"{before:.1f} -> {s.base.joint_deg:.1f} deg"
+    )
+    R.check(
+        "the elbow handle stands upright again",
+        bool(np.allclose([h.rotation_euler.x, h.rotation_euler.y, h.rotation_euler.z], 0.0, atol=1e-5)),
+    )
 
 
 def bone_moves(s: Any) -> Iterator[None]:

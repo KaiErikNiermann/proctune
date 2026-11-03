@@ -228,6 +228,8 @@ def rebuild() -> None:
     t = time.perf_counter()
     for name, pos in scene.moved_handles(STATE.written).items():
         s.drag(name, pos)
+    for name, rot in scene.turned_handles(STATE.written).items():
+        s.turn(name, rot)
     edits = scene.hand_edits(STATE.written)
     errors: list[ProctuneError] = []
     if edits:
@@ -263,7 +265,10 @@ def _notice(depsgraph: bpy.types.Depsgraph) -> None:
         if scene.HANDLE_KEY in obj and u.is_updated_transform:
             name = str(obj[scene.HANDLE_KEY])
             last = STATE.written.handles.get(name)
-            if last is not None and np.linalg.norm(np.array(obj.location) - last) > 1e-6:
+            moved = last is not None and np.linalg.norm(np.array(obj.location) - last) > 1e-6
+            done = STATE.written.handle_turns.get(name, np.eye(3))
+            turned = not np.allclose(np.array(obj.rotation_euler.to_matrix()), done, atol=1e-6)
+            if moved or turned:
                 STATE.dragged = STATE.dragged | {name}
                 schedule()
                 return

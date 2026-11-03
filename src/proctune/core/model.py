@@ -43,13 +43,16 @@ class Composite[P]:
 @dataclass(frozen=True)
 class Handle[P]:
     """A point in the scene bound to parameters: drawn at `position(p)`, and dragging it to a world point `w` sets
-    the parameters to `drag(p, w)` (a bone's tip that sets its length, say)."""
+    the parameters to `drag(p, w)` (a bone's tip that sets its length, say). If `turn` is given, turning the handle
+    by a world-space rotation `r` (3x3) sets them to `turn(p, r)` (a joint's handle that bends it); a handle without
+    one cannot be turned (its rotation is locked)."""
 
     name: str
     position: Callable[[P], F64]
     drag: Callable[[P, F64], P]
     edits: tuple[Path, ...] = ()
     """Parameters the handle changes, for the UI"""
+    turn: Callable[[P, F64], P] | None = None
 
 
 class Binds[P](Protocol):
