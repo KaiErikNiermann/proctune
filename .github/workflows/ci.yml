@@ -22,8 +22,8 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pipx install poetry
@@ -40,8 +40,8 @@ jobs:
         os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - if: runner.os == 'Linux'
@@ -54,14 +54,14 @@ jobs:
   e2e:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xauth imagemagick $BLENDER_LIBS
       - name: Blender
         id: blender
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: blender
           key: blender-${{ env.BLENDER_VERSION }}-linux-x64
@@ -80,7 +80,7 @@ jobs:
           PROCTUNE_E2E_REQUIRED: "1"
         run: poetry run pytest -q tests/test_e2e.py
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-screenshots
           path: e2e-out
