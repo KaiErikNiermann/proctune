@@ -1,6 +1,6 @@
 """End to end: the add-on in the real Blender GUI on a virtual display, driven by simulated input
-(tests/e2e/driver.py). Needs ``blender``, ``xvfb-run`` (Arch: xorg-server-xvfb) and ``magick`` (imagemagick, for
-screenshots); skipped without them. Set
+(tests/e2e/driver.py). Linux only. Needs ``blender``, ``xvfb-run`` (Arch: xorg-server-xvfb) and ``magick``
+(imagemagick, for screenshots), each settable in the proctune config; skipped without them. Set
 PROCTUNE_E2E_KEEP=DIR to keep the screenshots."""
 
 from __future__ import annotations
@@ -9,25 +9,37 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from proctune import config
+
 ROOT = Path(__file__).resolve().parents[1]
 TIMEOUT_S = 240
 
-pytestmark = pytest.mark.skipif(
-    any(shutil.which(t) is None for t in ("blender", "xvfb-run", "magick")),
-    reason="needs blender, xvfb-run (xorg-server-xvfb) and magick (imagemagick)",
+CFG = config.load()
+MISSING = [t for t in (CFG.blender, CFG.xvfb_run, CFG.magick) if shutil.which(t) is None]
+UNAVAILABLE = (
+    "Linux only"
+    if sys.platform != "linux"
+    else f"missing {', '.join(MISSING)} (see proctune.config)"
+    if MISSING
+    else ""
 )
+if UNAVAILABLE and os.environ.get("PROCTUNE_E2E_REQUIRED"):
+    # in CI a skip would pass silently: fail instead
+    raise RuntimeError(f"end-to-end tests required but cannot run: {UNAVAILABLE}")
+pytestmark = pytest.mark.skipif(bool(UNAVAILABLE), reason=UNAVAILABLE or "available")
 
 
 @pytest.fixture(scope="module")
 def run(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     out = Path(os.environ.get("PROCTUNE_E2E_KEEP") or tmp_path_factory.mktemp("e2e"))
     out.mkdir(parents=True, exist_ok=True)
-    subprocess.run([ROOT / "scripts" / "blender-site.sh"], check=True, capture_output=True)
+    subprocess.run([sys.executable, ROOT / "scripts" / "blender_site.py"], check=True, capture_output=True)
     project = out / "limb.json"
     shutil.copy(ROOT / "examples" / "limb" / "limb.json", project)
     doc = json.loads(project.read_text())
@@ -36,8 +48,8 @@ def run(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     # Blender prefers Wayland when it is there; without WAYLAND_DISPLAY it can only use the virtual X display
     env = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"} | {"DBUS_SESSION_BUS_ADDRESS": "/dev/null"}
     cmd = [
-        "xvfb-run", "-a", "-s", "-screen 0 1600x1000x24",
-        "blender", "--factory-startup", "--enable-event-simulate",
+        CFG.xvfb_run, "-a", "-s", "-screen 0 1600x1000x24",
+        CFG.blender, "--factory-startup", "--enable-event-simulate",
         "--python", str(ROOT / "tests" / "e2e" / "driver.py"), "--", str(out), str(project),
     ]  # fmt: skip
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=TIMEOUT_S, check=False)

@@ -37,7 +37,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import blender_env  # pyright: ignore[reportMissingImports]
 
 blender_env.setup()
+from proctune import config  # noqa: E402
 from proctune.blender import addon, scene  # noqa: E402
+
+MAGICK = config.load().magick
 
 TICKS = 4
 #: Longest wait for the add-on's own rebuild after an action (s)
@@ -131,7 +134,9 @@ def screenshot(name: str) -> None:
     """The X display as it is on screen. Blender's own screenshot operator reads back black under Xvfb's software
     OpenGL (.upstream-issues/blender-screenshot-black-under-xvfb-*), so the frame is taken from the X server."""
     path = OUT / f"{len(R.screenshots):02d}-{name}.png"
-    subprocess.run(["magick", "import", "-window", "root", str(path)], check=True, capture_output=True)
+    # ImageMagick 7 is `magick import`; ImageMagick 6 (Ubuntu) has `import` on its own (PROCTUNE_MAGICK=import)
+    cmd = [MAGICK, "import"] if Path(MAGICK).name.startswith("magick") else [MAGICK]
+    subprocess.run([*cmd, "-window", "root", str(path)], check=True, capture_output=True)
     R.screenshots.append(path.name)
 
 

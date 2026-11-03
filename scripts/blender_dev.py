@@ -1,4 +1,4 @@
-"""Run inside Blender (scripts/gui.sh): register proctune from this checkout and open the project given after
+"""Run inside Blender (scripts/gui.py): register proctune from this checkout and open the project given after
 ``--``."""
 
 import sys
