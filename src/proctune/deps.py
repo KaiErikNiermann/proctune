@@ -40,7 +40,13 @@ CORE: tuple[Requirement, ...] = (
     Requirement("scipy", "scipy", "curve parameters (PCHIP)"),
 )
 #: Import names that differ from their pip package
-PACKAGE_OF: dict[str, str] = {"yaml": "PyYAML", "sklearn": "scikit-learn", "skimage": "scikit-image", "PIL": "Pillow"}
+PACKAGE_OF: dict[str, str] = {
+    "yaml": "PyYAML",
+    "sklearn": "scikit-learn",
+    "skimage": "scikit-image",
+    "PIL": "Pillow",
+    "igl": "libigl",
+}
 
 
 def requirement(module: str, why: str = "") -> Requirement:

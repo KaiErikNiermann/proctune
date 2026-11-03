@@ -72,10 +72,11 @@ def layer_collection(layer: str) -> bpy.types.Collection:
     return _collection(f"{ROOT}: {layer}", root())
 
 
-def _material(layer: str) -> bpy.types.Material:
+def _material(layer: str, colours: dict[str, tuple[float, float, float, float]]) -> bpy.types.Material:
+    """A viewport material per layer: the model's colour for it (`layer_colours`), else proctune's default."""
     name = f"{ROOT} {layer}"
     m = bpy.data.materials.get(name) or bpy.data.materials.new(name)
-    m.diffuse_color = COLOURS.get(layer, (0.6, 0.6, 0.6, 1.0))
+    m.diffuse_color = colours.get(layer) or COLOURS.get(layer, (0.6, 0.6, 0.6, 1.0))
     return m
 
 
@@ -129,7 +130,12 @@ def _frame_object(name: str) -> bpy.types.Object:
     return obj
 
 
-def write(result: Result, written: Written, skip: frozenset[str] = frozenset()) -> None:
+def write(
+    result: Result,
+    written: Written,
+    skip: frozenset[str] = frozenset(),
+    colours: dict[str, tuple[float, float, float, float]] | None = None,
+) -> None:
     """Create or update an object per element; remove objects of elements that no longer exist."""
     objs = element_objects()
     for name, r in result.elements.items():
@@ -142,7 +148,7 @@ def write(result: Result, written: Written, skip: frozenset[str] = frozenset()) 
             obj = bpy.data.objects.new(name, me)
             obj[ELEMENT_KEY] = name
             layer_collection(e.layer).objects.link(obj)
-            me.materials.append(_material(e.layer))
+            me.materials.append(_material(e.layer, colours or {}))
         me = cast(bpy.types.Mesh, obj.data)
         if obj.mode == "EDIT":
             continue  # its edit mesh would overwrite this; it is written after leaving edit mode

@@ -1,6 +1,7 @@
 """What a model provides: its parameters, the stages that generate its elements, composites and handles.
 
-A model may also implement `Binds`, turning a hand move of an element into parameter changes.
+A model may also implement `Binds`, turning a hand move of an element into parameter changes, and give a
+``layer_colours`` attribute (layer name to RGBA) for how its layers are drawn.
 
 A model is built in stages, each seeing the elements of the stages before it *with their edits applied*: a scaffold
 (a skeleton), structure placed on it (muscles, fat), then a surface over everything (a skin). So a sculpted muscle

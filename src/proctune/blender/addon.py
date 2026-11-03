@@ -237,7 +237,7 @@ def rebuild() -> None:
             s.evaluate()
         errors = scene.apply_hand_edits(s, edits, STATE.written)
     result = s.evaluate()
-    scene.write(result, STATE.written)
+    scene.write(result, STATE.written, colours=getattr(s.model, "layer_colours", None))
     scene.write_handles(s, STATE.written, skip=STATE.dragged)
     STATE.dragged = frozenset()
     sync_properties()

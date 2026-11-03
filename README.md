@@ -32,6 +32,15 @@ In Blender each curve is edited in Blender's own curve widget in the panel (it l
 
 Any slider or composite can be keyframed, and the model follows the timeline: a frame-change handler rebuilds with the animated values. On save the animated values are sampled once per frame into the project's `tracks`, and `Session.at_frame(f)` gives the model at any frame without Blender. Sculpts and moves carry through all of this, since they are stored relative to each element's size.
 
+## Two ways to make a skin
+
+The limb builds its skin twice, on two layers, so they can be compared with the layer toggles:
+
+- **skin** (the sweep, the example's own heuristic): a tube around a smoothed centreline through the bones; at each ring and angle its radius is the furthest tissue in that direction, smoothed, plus a thickness. It covers every tissue vertex and bridges the gaps between muscle and bone, but it assumes a tube-like body, and the inside of a sharp bend can fold.
+- **wrap skin** (what Blender's Shrinkwrap, Nearest Surface Point with an Offset, followed by Corrective Smooth would make): a loose tube around everything, snapped onto the nearest tissue surface plus an offset and relaxed with Taubin smoothing (which does not shrink), in a few rounds. It hugs the tissue (833 ml against the sweep's 921 ml at the defaults), pinches in between muscle and bone the way shrinkwrapped meshes do, and webs across the inside of a sharp bend; relaxing lets about 0.2 % of the tissue's vertices poke through. Its settings are under `wrap` (offset, rounds, relax iterations, how loose the start tube is, and a switch to turn it off).
+
+Both keep a fixed vertex layout, so both can be sculpted. libigl finds the wrap's nearest points (an AABB tree, 25 times faster than trimesh's own query here); the whole rebuild with both skins takes about 40 ms.
+
 ## Writing a model
 
 ```python
@@ -147,7 +156,7 @@ CI (GitHub Actions) runs lint and type checks, the tests on Linux and Windows, a
 
 ### Performance and leaks
 
-Medians on a Ryzen 9 9900X3D with Blender 5.2.3, from `poetry run pytest benchmarks`: a full rebuild in Blender (capture hand edits, evaluate, write every mesh, place handles, sync sliders) 9.8 ms; evaluating the limb in plain Python 6.3 ms, the same with every element sculpted; the skin stage 2.3 ms; detecting hand edits 0.7 ms; capturing a sculpt 0.09 ms; saving and loading a project with sculpts 10 ms; a curve at 100,000 points 0.5 ms. Rebuild time per element stays flat from 20 to 400 elements (`test_rebuild_time_is_linear_in_the_element_count`). Over 300 rebuilds Python memory grows by less than 2 MB, resident memory by less than 40 MB, and Blender's data (objects, meshes, materials, node groups, collections, images) not at all; reopening a project 15 times and registering the add-on 10 times leave nothing behind.
+Medians on a Ryzen 9 9900X3D with Blender 5.2.3, from `poetry run pytest benchmarks`: a full rebuild in Blender (capture hand edits, evaluate, write every mesh, place handles, sync sliders) 43 ms with both skins, 9.8 ms with the wrap skin off; evaluating the limb in plain Python 40 ms (6.3 ms without the wrap skin), the same with every element sculpted; the sweep skin 2.3 ms, the wrap skin 33 ms; detecting hand edits 0.7 ms; capturing a sculpt 0.09 ms; saving and loading a project with sculpts 10 ms; a curve at 100,000 points 0.5 ms. Rebuild time per element stays flat from 20 to 400 elements (`test_rebuild_time_is_linear_in_the_element_count`). Over 300 rebuilds Python memory grows by less than 2 MB, resident memory by less than 40 MB, and Blender's data (objects, meshes, materials, node groups, collections, images) not at all; reopening a project 15 times and registering the add-on 10 times leave nothing behind.
 
 ## Known limits
 

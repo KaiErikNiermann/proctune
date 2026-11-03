@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from proctune import config  # noqa: E402
 
-PACKAGES = ("scipy", "trimesh", "optuna")
+PACKAGES = ("scipy", "trimesh", "libigl", "optuna")
 
 
 def main() -> int:

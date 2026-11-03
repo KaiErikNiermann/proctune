@@ -46,6 +46,13 @@ def test_skin_stage(benchmark: BenchmarkFixture) -> None:
     benchmark(limb.skin, s.effective, upstream)
 
 
+def test_wrap_skin_stage(benchmark: BenchmarkFixture) -> None:
+    s = _sculpted()
+    r = s.evaluate()
+    upstream = {n: e for n, e in r.elements.items() if n not in ("skin", "wrap skin")}
+    benchmark(limb.wrap_skin, s.effective, upstream)
+
+
 def test_curve_100k_points(benchmark: BenchmarkFixture) -> None:
     c = Curve.through((0.0, 0.0), (0.2, 0.7), (0.5, 0.8), (1.0, 1.0))
     x = np.linspace(0.0, 1.0, 100_000)

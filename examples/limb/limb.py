@@ -8,6 +8,8 @@ swept over both (surface).
 - Skin: a tube around a smoothed centreline through the bones. At each ring and angle its radius is the furthest
   point of the bones and muscle (resolved, so sculpts show through) in that direction, smoothed, plus a thickness.
   Every skin vertex has its own frame (out, along, around the limb), so a skin sculpt follows the bend.
+- Wrap skin, for comparison: the same tissue covered the way Blender's Shrinkwrap and Corrective Smooth would: a
+  loose tube snapped onto the nearest tissue surface with an offset, relaxed, in a few rounds (`wrap_skin`).
 
 - Fat: a deposit along each bone, its thickness set by overall adiposity through its own curve (one fills in early
   and mildly, the other late and steeply).
@@ -29,6 +31,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Annotated, cast
 
+import igl  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 import trimesh
 from numpy.typing import NDArray
@@ -43,6 +46,10 @@ type F64 = NDArray[np.float64]
 #: Mesh resolution (fixed: a sculpt is stored per vertex)
 RINGS, SECTIONS = 48, 32
 SKIN_RINGS, SKIN_SECTIONS = 96, 48
+#: The wrapped skin's tube: coarser, as each round queries the nearest tissue point for every vertex
+WRAP_RINGS, WRAP_SECTIONS = 64, 32
+#: Layers the skins cover
+TISSUE = ("bone", "muscle", "fat")
 #: Plane normal of the joint's bend (the chain lies in the x-y plane, the upper bone along +y)
 BEND_AXIS = np.array([0.0, 0.0, 1.0])
 
@@ -70,6 +77,20 @@ class Skin:
     thickness: Annotated[float, Range(0.0, 0.02, 0.0005, "m", "Fat and skin over the outermost tissue")] = 0.004
     smoothing: Annotated[float, Range(0.0, 6.0, 0.1, "", "Gaussian sigma, in rings and sections")] = 2.0
     corner: Annotated[float, Range(0.0, 0.05, 0.001, "", "How much the centreline rounds the joint")] = 0.004
+
+
+@dataclass(frozen=True)
+class Wrap:
+    """The second skin, made the way Blender's Shrinkwrap (Nearest Surface Point, with an Offset) followed by
+    Corrective Smooth would make it, for comparison with the sweep."""
+
+    enabled: bool = True
+    offset: Annotated[float, Range(0.0, 0.02, 0.0005, "m", "Distance kept from the tissue (Shrinkwrap's Offset)")] = (
+        0.004
+    )
+    passes: Annotated[int, Range(1, 8, 1, "", "Snap-then-relax rounds")] = 3
+    relax: Annotated[int, Range(0, 40, 1, "", "Taubin smoothing iterations per round (0: pure Shrinkwrap)")] = 10
+    slack: Annotated[float, Range(1.0, 2.5, 0.05, "", "Start tube radius, times the furthest tissue")] = 1.3
 
 
 @dataclass(frozen=True)
@@ -115,6 +136,7 @@ class Limb:
     fat: Fat = field(default_factory=Fat)
     growth: Growth = field(default_factory=Growth)
     skin: Skin = field(default_factory=Skin)
+    wrap: Wrap = field(default_factory=Wrap)
 
 
 def size_factor(p: Limb) -> float:
@@ -262,12 +284,49 @@ def centreline(p: Limb, n: int = SKIN_RINGS) -> tuple[F64, F64]:
     return pos, tan / np.linalg.norm(tan, axis=1, keepdims=True)
 
 
-def skin(p: Limb, done: Mapping[str, Resolved]) -> tuple[Element, ...]:
-    pos, tan = centreline(develop(p))
+@dataclass(frozen=True)
+class Tube:
+    """A closed tube around a centreline: rings of vertices at given radii, two caps, and a frame per vertex (out,
+    along, around the limb; scaled by the local radius) so a sculpt follows the limb as it bends and grows."""
+
+    verts: F64
+    faces: NDArray[np.int32]
+    axes: F64
+    scale: F64
+
+
+def tube(pos: F64, tan: F64, radius: F64) -> Tube:
+    rings, sections = radius.shape
     out = np.cross(tan, BEND_AXIS)  # in the bend plane, towards +x at rest
     around = np.cross(out, tan)
+    ang = np.linspace(0.0, 2 * np.pi, sections, endpoint=False)
+    radial = np.cos(ang)[None, :, None] * out[:, None, :] + np.sin(ang)[None, :, None] * around[:, None, :]
+    ring_verts = pos[:, None, :] + radial * radius[:, :, None]
+    caps = np.vstack([pos[0] - tan[0] * radius[0].mean() * 0.6, pos[-1] + tan[-1] * radius[-1].mean() * 0.6])
+    tangent = np.repeat(tan, sections, axis=0)
+    rad = radial.reshape(-1, 3)
+    axes = np.stack([rad, tangent, np.cross(rad, tangent)], axis=2)
+    cap_axes = np.stack([np.column_stack([-tan[0], *_perp(tan[0])]), np.column_stack([tan[-1], *_perp(tan[-1])])])
+    sizes = np.concatenate([radius.reshape(-1), [radius[0].mean(), radius[-1].mean()]])
+    return Tube(
+        np.vstack([ring_verts.reshape(-1, 3), caps]),
+        _tube_faces(rings, sections),
+        np.concatenate([axes, cap_axes]),
+        np.repeat(sizes[:, None], 3, axis=1),
+    )
+
+
+def _tissue(done: Mapping[str, Resolved]) -> list[Resolved]:
+    return [r for r in done.values() if r.element.layer in TISSUE]
+
+
+def skin(p: Limb, done: Mapping[str, Resolved]) -> tuple[Element, ...]:
+    """The sweep: at each ring and angle, the furthest tissue in that direction, smoothed, plus a thickness."""
+    pos, tan = centreline(develop(p))
+    out = np.cross(tan, BEND_AXIS)
+    around = np.cross(out, tan)
     # every tissue vertex to its nearest centreline point, then to an angle and a distance in that ring's plane
-    tissue = np.vstack([r.verts for r in done.values()])
+    tissue = np.vstack([r.verts for r in _tissue(done)])
     ring = np.asarray(KDTree(pos).query(tissue)[1], np.intp)
     rel: F64 = tissue - pos[ring]
     rel -= tan[ring] * np.einsum("ij,ij->i", rel, tan[ring])[:, None]
@@ -280,24 +339,43 @@ def skin(p: Limb, done: Mapping[str, Resolved]) -> tuple[Element, ...]:
     radius = ndimage.maximum_filter(radius, size=(3, 3), mode=("nearest", "wrap"))
     if p.skin.smoothing > 0:
         radius = ndimage.gaussian_filter(radius, p.skin.smoothing, mode=("nearest", "wrap"))
-    radius += p.skin.thickness
-    ang = np.linspace(0.0, 2 * np.pi, SKIN_SECTIONS, endpoint=False)
-    radial = np.cos(ang)[None, :, None] * out[:, None, :] + np.sin(ang)[None, :, None] * around[:, None, :]
-    ring_verts = pos[:, None, :] + radial * radius[:, :, None]
-    caps = np.vstack([pos[0] - tan[0] * radius[0].mean() * 0.6, pos[-1] + tan[-1] * radius[-1].mean() * 0.6])
-    verts = np.vstack([ring_verts.reshape(-1, 3), caps])
-    faces = _tube_faces(SKIN_RINGS, SKIN_SECTIONS)
-    # per-vertex sculpt frames: out, along, around; scaled by the local radius so a sculpt grows with the limb
-    tangent = np.repeat(tan, SKIN_SECTIONS, axis=0)
-    rad = radial.reshape(-1, 3)
-    axes = np.stack([rad, tangent, np.cross(rad, tangent)], axis=2)
-    cap_axes = np.stack([np.column_stack([-tan[0], *_perp(tan[0])]), np.column_stack([tan[-1], *_perp(tan[-1])])])
-    scale = np.repeat(
-        np.vstack([radius.reshape(-1, 1), radius[[0], :].mean(keepdims=True), radius[[-1], :].mean(keepdims=True)]),
-        3,
-        axis=1,
+    t = tube(pos, tan, radius + p.skin.thickness)
+    return (Element("skin", "skin", Frame.world(), t.verts, t.faces, t.axes, t.scale),)
+
+
+def wrap_skin(p: Limb, done: Mapping[str, Resolved]) -> tuple[Element, ...]:
+    """Shrinkwrap-style: a loose tube around everything, then rounds of snapping every vertex to the nearest point
+    on the tissue plus `offset` along that surface's normal (Shrinkwrap, Nearest Surface Point, Offset) and relaxing
+    the mesh (Taubin smoothing, which does not shrink it, standing in for Corrective Smooth). libigl finds the
+    nearest points (an AABB tree; trimesh's own query was 25 times slower here), trimesh smooths."""
+    w = p.wrap
+    if not w.enabled:
+        return ()
+    pos, tan = centreline(develop(p), WRAP_RINGS)
+    parts = _tissue(done)
+    # trimesh is untyped: its results are cast to what it documents
+    concatenate = cast(Callable[[list[trimesh.Trimesh]], trimesh.Trimesh], trimesh.util.concatenate)  # pyright: ignore[reportUnknownMemberType]
+    tissue = concatenate([trimesh.Trimesh(r.verts, r.faces, process=False) for r in parts])
+    tissue_verts = np.asarray(tissue.vertices, np.float64)
+    nearest = np.asarray(KDTree(pos).query(tissue_verts)[1], np.intp)
+    reach = float(np.linalg.norm(tissue_verts - pos[nearest], axis=1).max())
+    t = tube(pos, tan, np.full((WRAP_RINGS, WRAP_SECTIONS), reach * w.slack))
+    mesh = trimesh.Trimesh(t.verts, t.faces, process=False)
+    nearest_on = cast(
+        Callable[[F64, F64, NDArray[np.int64]], tuple[F64, NDArray[np.int64], F64]], igl.point_mesh_squared_distance
     )
-    return (Element("skin", "skin", Frame.world(), verts, faces, np.concatenate([axes, cap_axes]), scale),)
+    taubin = cast(Callable[..., None], trimesh.smoothing.filter_taubin)  # pyright: ignore[reportUnknownMemberType]
+    normals = np.asarray(tissue.face_normals, np.float64)
+    verts = t.verts
+    faces = np.asarray(tissue.faces, np.int64)
+    for _ in range(w.passes):
+        _, tri, closest = nearest_on(verts, tissue_verts, faces)
+        verts = np.asarray(closest, np.float64) + normals[np.asarray(tri, np.intp)] * w.offset
+        if w.relax:
+            mesh.vertices = verts
+            taubin(mesh, iterations=w.relax)
+            verts = np.asarray(mesh.vertices, np.float64)
+    return (Element("wrap skin", "wrap skin", Frame.world(), verts, t.faces, t.axes, t.scale),)
 
 
 def _perp(v: F64) -> tuple[F64, F64]:
@@ -396,13 +474,22 @@ def bind(p: Limb, element: str, matrix: F64) -> Limb | None:
 @dataclass(frozen=True)
 class LimbModel:
     name: str = "limb"
+    layer_colours: dict[str, tuple[float, float, float, float]] = field(
+        default_factory=lambda: {"wrap skin": (0.55, 0.68, 0.85, 0.45)}
+    )
 
     def defaults(self) -> Limb:
         return Limb()
 
     @property
     def stages(self) -> tuple[Stage[Limb], ...]:
-        return (Stage("scaffold", bones), Stage("structure", muscles), Stage("fat", fat), Stage("surface", skin))
+        return (
+            Stage("scaffold", bones),
+            Stage("structure", muscles),
+            Stage("fat", fat),
+            Stage("surface", skin),
+            Stage("wrap", wrap_skin),
+        )
 
     @property
     def composites(self) -> tuple[Composite[Limb], ...]:

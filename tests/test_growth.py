@@ -182,3 +182,52 @@ def test_a_handle_without_a_turn_says_so() -> None:
 
     with pytest.raises(EditError, match="cannot be turned"):
         _session().turn("wrist", _rot_z(10.0)[:3, :3])
+
+
+# ------------------------------------------------------------------------------------------------- the two skins
+
+
+def _coverage(s: Session[limb.Limb], name: str) -> float:
+    """Share of tissue vertices inside the skin (libigl's winding number)."""
+    import igl  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+
+    r = s.evaluate()
+    tissue = np.vstack([e.verts for e in r.elements.values() if e.element.layer in limb.TISSUE])
+    skin = r.elements[name]
+    w = np.asarray(igl.winding_number(skin.verts, skin.faces.astype(np.int64), tissue))  # pyright: ignore[reportUnknownMemberType]
+    return float((w > 0.5).mean())
+
+
+def test_both_skins_cover_the_tissue() -> None:
+    s = _session()
+    assert _coverage(s, "skin") == 1.0
+    assert _coverage(s, "wrap skin") > 0.99  # relaxing pulls the wrap in a little at sharp spots
+
+
+def test_the_wrap_hugs_tighter_than_the_sweep() -> None:
+    import trimesh  # noqa: PLC0415
+
+    r = _session().evaluate()
+    vol = {
+        n: trimesh.Trimesh(r.elements[n].verts, r.elements[n].faces, process=False).volume
+        for n in ("skin", "wrap skin")
+    }
+    assert vol["wrap skin"] < vol["skin"]
+
+
+def test_the_wrap_keeps_its_topology_and_can_be_switched_off() -> None:
+    s = _session()
+    shape = s.evaluate().elements["wrap skin"].verts.shape
+    s.set(("joint_deg",), 90.0)
+    s.set(("wrap", "passes"), 5)
+    assert s.evaluate().elements["wrap skin"].verts.shape == shape
+    s.set(("wrap", "enabled"), False)
+    assert "wrap skin" not in s.evaluate().elements
+
+
+def test_more_offset_moves_the_wrap_out() -> None:
+    s = _session()
+    thin = s.evaluate().elements["wrap skin"].verts
+    s.set(("wrap", "offset"), 0.012)
+    thick = s.evaluate().elements["wrap skin"].verts
+    assert np.linalg.norm(thick - thin, axis=1).mean() > 0.004
