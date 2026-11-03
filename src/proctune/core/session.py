@@ -26,9 +26,9 @@ from proctune.core import files
 from proctune.core import params as P
 from proctune.core.element import Edit, Element, Resolved, Tweak, capture_sculpt, capture_tweak, resolve
 from proctune.core.model import F64, Binds, Handle, Model
-from proctune.errors import MissingDependenciesError, ModelError, ProctuneError, ProjectError
+from proctune.errors import EditError, MissingDependenciesError, ModelError, ProctuneError, ProjectError
 
-FORMAT = 1
+FORMAT = 2
 type Track = tuple[tuple[float, float], ...]
 """(frame, value) samples"""
 COMPOSITE = "composite:"
@@ -162,10 +162,23 @@ class Session[T]:
             if bound is not None:
                 self.base = bound
                 return
-        if not r.element.tweakable:
-            raise ValueError(f"{name} cannot be moved as a whole")
         edit = self.edits.get(name, Edit())
-        self.edits[name] = Edit(edit.tweak.then(capture_tweak(r.element, matrix)), edit.displacement)
+        if not r.element.tweakable:
+            # a surface rebuilt around others (a skin) has no place of its own to move: its moved vertices are
+            # kept as what they are, a sculpt in its per-vertex frames
+            self.capture_sculpt(name, r.verts @ matrix[:3, :3].T + matrix[:3, 3])
+            return
+        self.edits[name] = Edit(capture_tweak(r.element, matrix, edit.tweak), edit.displacement)
+
+    def set_tweak(self, name: str, tweak: Tweak) -> None:
+        """Set an element's move outright (from its object's transform relative to its generated place)."""
+        r = self._resolved(name)
+        if not r.element.tweakable:
+            raise EditError(f"{name} has no place of its own to move", "sculpt it instead")
+        edit = self.edits.get(name, Edit())
+        self.edits[name] = Edit(tweak, edit.displacement)
+        if tweak.identity and edit.displacement is None:
+            del self.edits[name]
 
     def clear(self, name: str, *, sculpt: bool = True, tweak: bool = True) -> None:
         edit = self.edits.get(name)
@@ -191,7 +204,11 @@ class Session[T]:
             "composites": self.composites,
             "tracks": {n: [list(fv) for fv in t] for n, t in self.tracks.items()},
             "tweaks": {
-                n: {"linear": e.tweak.linear.tolist(), "offset": e.tweak.offset.tolist()}
+                n: {
+                    "offset": e.tweak.offset.tolist(),
+                    "rotation": e.tweak.rotation.tolist(),
+                    "scale": e.tweak.scale.tolist(),
+                }
                 for n, e in self.edits.items()
                 if not e.tweak.identity
             },
@@ -211,6 +228,8 @@ class Session[T]:
     @staticmethod
     def load(path: FsPath) -> Session[Any]:
         doc = files.read_json(path)
+        if doc.get("format") == 1 and not doc.get("tweaks"):
+            doc["format"] = FORMAT  # format 2 changed only how tweaks are stored
         if doc.get("format") != FORMAT:
             raise ProjectError(
                 f"{path}: project format {doc.get('format')!r}, this proctune reads {FORMAT}",
@@ -234,8 +253,18 @@ class Session[T]:
         tracks = cast(dict[str, list[list[float]]], doc.get("tracks", {}))
         s.tracks = {n: tuple((float(f), float(v)) for f, v in t) for n, t in tracks.items()}
         tweaks = cast(dict[str, dict[str, list[Any]]], doc.get("tweaks", {}))
-        for n, t in tweaks.items():
-            s.edits[n] = Edit(Tweak(np.array(t["linear"], np.float64), np.array(t["offset"], np.float64)))
+        try:
+            for n, t in tweaks.items():
+                arrays = (
+                    np.array(t["offset"], np.float64),
+                    np.array(t["rotation"], np.float64),
+                    np.array(t["scale"], np.float64),
+                )
+                s.edits[n] = Edit(Tweak(*arrays))
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProjectError(
+                f"{path}: a move (tweaks) cannot be read: {e}", "remove the broken entry under tweaks"
+            ) from e
         npz = path.with_suffix(".npz")
         if npz.exists():
             try:

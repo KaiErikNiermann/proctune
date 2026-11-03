@@ -17,6 +17,10 @@ class ProjectError(ProctuneError):
     """A project file cannot be read or written."""
 
 
+class EditError(ProctuneError):
+    """A hand edit cannot be kept as it is."""
+
+
 class ModelError(ProctuneError):
     """The model's own code failed while building."""
 

@@ -31,6 +31,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 from proctune import config, deps
 from proctune.blender import curves, scene, timeline
 from proctune.core import Session, Spec, files, specs
+from proctune.core import params as P
 from proctune.core.params import Path as ParamPath
 from proctune.core.session import describe
 from proctune.errors import MissingDependenciesError, ProctuneError
@@ -136,6 +137,13 @@ def _install_group(session: Session[Any]) -> None:
     sync_properties()
 
 
+def props_session_base() -> object:
+    s = STATE.session
+    if s is None:
+        raise ProctuneError("no project open", "open or start a project first")
+    return s.base
+
+
 def sync_properties() -> None:
     """Show the session's values on the sliders without triggering their updates."""
     s = STATE.session
@@ -145,7 +153,8 @@ def sync_properties() -> None:
     STATE.syncing = True
     try:
         for spec in specs(s.base):
-            setattr(props, spec.key, spec.default)
+            if spec.kind != "curve":  # curves live in their widgets (blender/curves.py)
+                setattr(props, spec.key, spec.default)
         for c in s.model.composites:
             setattr(props, f"composite__{c.name}", s.composites.get(c.name, c.default))
     finally:
@@ -220,10 +229,11 @@ def rebuild() -> None:
     for name, pos in scene.moved_handles(STATE.written).items():
         s.drag(name, pos)
     edits = scene.hand_edits(STATE.written)
+    errors: list[ProctuneError] = []
     if edits:
         if s.last is None:
             s.evaluate()
-        scene.apply_hand_edits(s, edits)
+        errors = scene.apply_hand_edits(s, edits, STATE.written)
     result = s.evaluate()
     scene.write(result, STATE.written)
     scene.write_handles(s, STATE.written, skip=STATE.dragged)
@@ -233,6 +243,8 @@ def rebuild() -> None:
     stale = result.stale
     STATE.message = f"stale sculpt (topology changed): {', '.join(stale)}" if stale else ""
     STATE.error = None
+    if errors:
+        raise errors[0]  # the scene is already written back: the failed edit is undone, the rest kept
 
 
 @persistent
@@ -307,6 +319,8 @@ def _start(session: Session[Any], path: Path | None) -> None:
     STATE.session, STATE.path, STATE.written = session, path, scene.Written()
     for obj in [*scene.element_objects().values(), *scene.handle_objects().values()]:
         scene.remove(obj)
+    for obj in scene.frame_objects().values():
+        bpy.data.objects.remove(obj)
     _install_group(session)
     if path is not None:
         bpy.context.scene[PROJECT_KEY] = str(path)
@@ -464,6 +478,23 @@ class PROCTUNE_OT_install(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class PROCTUNE_OT_reset_param(bpy.types.Operator):
+    """Set this parameter back to the model's default"""
+
+    bl_idname = "proctune.reset_param"
+    bl_label = "Reset to default"
+    key: StringProperty()  # pyright: ignore[reportInvalidTypeForm]
+
+    def execute(self, context: bpy.types.Context) -> Ret:
+        s = STATE.session
+        path = STATE.keys.get(self.key)
+        if s is None or path is None:
+            return {"CANCELLED"}
+        s.set(path, P.get(s.model.defaults(), path))
+        rebuild()
+        return {"FINISHED"}
+
+
 class PROCTUNE_OT_rebuild(bpy.types.Operator):
     """Capture hand edits and rebuild every element"""
 
@@ -557,14 +588,16 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
             box.label(text="Composites", icon="DRIVER")
             for c in s.model.composites:
                 box.prop(props, f"composite__{c.name}", slider=True, text=c.name)
+        defaults = s.model.defaults()
         groups: dict[ParamPath, list[Spec]] = {}
         for spec in specs(s.base):
-            groups.setdefault(spec.path[:-1], []).append(spec)
+            if spec.kind != "curve":  # drawn as curve widgets below
+                groups.setdefault(spec.path[:-1], []).append(spec)
         for prefix, items in groups.items():
             box = lay.box()
             box.label(text=" / ".join(prefix) if prefix else "Parameters", icon="PROPERTIES")
             for spec in items:
-                box.prop(props, spec.key, slider=spec.kind == "float")
+                self._slider(box, props, spec, defaults)
         curves.draw(lay, s)
         self._layers(lay)
         self._edits(lay, s)
@@ -592,10 +625,26 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         box.label(text="Layers", icon="OUTLINER_COLLECTION")
         row = box.row(align=True)
         for c in scene.root().children:
-            if c.name != scene.HANDLES:
+            if c.name not in (scene.HANDLES, scene.FRAMES):
                 row.prop(
                     c, "hide_viewport", text=c.name.removeprefix(f"{scene.ROOT}: "), toggle=True, invert_checkbox=True
                 )
+
+    @staticmethod
+    def _slider(box: bpy.types.UILayout, props: Any, spec: Spec, defaults: object) -> None:
+        """The slider, and where it differs from the model's default: the ratio to it and a reset button."""
+        row = box.row(align=True)
+        value, default = P.get(props_session_base(), spec.path), P.get(defaults, spec.path)
+        if spec.kind == "bool" or value == default:
+            row.prop(props, spec.key, slider=spec.kind == "float")
+            return
+        v, d = float(cast(float, value)), float(cast(float, default))
+        # the ratio goes into the slider's own text: a label beside it would squeeze the name to "len..."
+        relative = f"x{v / d:.2f}" if d != 0 else f"{v - d:+.3g}"
+        row.prop(props, spec.key, slider=spec.kind == "float", text=f"{spec.label} {relative}")
+        op = row.operator("proctune.reset_param", text="", icon="LOOP_BACK")
+        if op is not None:
+            op.key = spec.key
 
     @staticmethod
     def _edits(lay: bpy.types.UILayout, s: Session[Any]) -> None:
@@ -603,8 +652,11 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         box.label(text="Hand edits (move or sculpt an element)", icon="SCULPTMODE_HLT")
         if not s.edits:
             box.label(text="none")
+        sizes = {n: r.element.frame.scale for n, r in (s.last.elements.items() if s.last else ())}
         for name, e in s.edits.items():
-            what = [w for w, on in (("sculpt", e.displacement is not None), ("moved", not e.tweak.identity)) if on]
+            what = ["sculpted"] if e.displacement is not None else []
+            if not e.tweak.identity and name in sizes:
+                what.append(e.tweak.describe(sizes[name]))
             row = box.row(align=True)
             row.label(text=f"{name}: {', '.join(what)}")
             op = row.operator("proctune.clear", text="", icon="X")
@@ -628,6 +680,7 @@ CLASSES: tuple[type, ...] = (
     PROCTUNE_OT_open_stored,
     PROCTUNE_OT_new,
     PROCTUNE_OT_save,
+    PROCTUNE_OT_reset_param,
     PROCTUNE_OT_rebuild,
     PROCTUNE_OT_clear,
     PROCTUNE_OT_defaults,

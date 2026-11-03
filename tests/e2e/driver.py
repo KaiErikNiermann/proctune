@@ -147,7 +147,7 @@ def show_only(*layers: str) -> None:
 
 
 def verts(name: str) -> np.ndarray[Any, np.dtype[np.float64]]:
-    return scene.read_verts(bpy.data.objects[name])
+    return scene.world_verts(bpy.data.objects[name])
 
 
 def override() -> Any:
@@ -211,9 +211,8 @@ def scenario() -> Iterator[None]:  # noqa: PLR0915 -- one linear story, step by 
     yield from settle()
     edit = s.edits.get("muscle")
     R.check("grab is captured as a tweak", edit is not None and not edit.tweak.identity)
-    R.check(
-        "object transform is reset", bool(np.allclose(np.array(bpy.data.objects["muscle"].matrix_world), np.eye(4)))
-    )
+    loc = np.array(bpy.data.objects["muscle"].location)
+    R.check("the muscle's Location shows the move", float(np.linalg.norm(loc)) > 0.002, f"location {np.round(loc, 4)}")
     moved = float(np.linalg.norm(verts("muscle").mean(axis=0) - muscle_before.mean(axis=0)))
     R.check("muscle stays where it was dropped", moved > 0.002, f"moved {moved * 1000:.1f} mm")
     R.check("skin follows the moved muscle", float(np.abs(verts("skin") - skin_before).max()) > 1e-4)
@@ -291,6 +290,7 @@ def scenario() -> Iterator[None]:  # noqa: PLR0915 -- one linear story, step by 
     screenshot("handle")
 
     yield from bone_moves(s)
+    yield from skin_scale(s)
     yield from curve_and_timeline(s)
 
     out = OUT / "saved.json"
@@ -348,6 +348,28 @@ def bone_moves(s: Any) -> Iterator[None]:
         abs(bpy.context.scene.proctune_params.upper__length - s.base.upper.length) < 1e-4,
     )
     screenshot("bones-moved")
+
+
+def skin_scale(s: Any) -> Iterator[None]:
+    """S on the skin (which has no place of its own): kept as a sculpt, no error, the next rebuild clean."""
+    skin = bpy.data.objects["skin"]
+    select_only(skin.name)
+    centre = to_window(verts("skin").mean(axis=0))
+    edge = (centre[0] + 80, centre[1])
+    yield from move_to(edge)
+    yield from key("S", edge)
+    for k in range(1, 6):
+        yield from move_to((edge[0] + 4 * k, edge[1]))
+    yield from key("LEFTMOUSE", (edge[0] + 20, edge[1]))
+    yield from settle()
+    R.check("scaling the skin raises no error", addon.STATE.error is None, str(addon.STATE.error))
+    R.check(
+        "scaling the skin is kept as a sculpt",
+        s.edits.get("skin") is not None and s.edits["skin"].displacement is not None,
+    )
+    bpy.context.scene.proctune_params.joint_deg = s.base.joint_deg + 1.0
+    yield from settle()
+    R.check("the next rebuild is clean", addon.STATE.error is None, str(addon.STATE.error))
 
 
 def limb_chain(s: Any) -> Any:

@@ -1,8 +1,11 @@
 """Writing a session's result into the Blender scene and reading hand edits back out of it.
 
-Each element is one object (named as the element) in a collection per layer under ``proctune``; the object's
-transform is kept at identity and the vertices are written in world coordinates, so a transform on the object is a
-hand move and a vertex that differs from what was written is a sculpt. Handles are empties.
+Each element is one object (named as the element) in a collection per layer under ``proctune``. A movable element's
+object is parented to a hidden empty placed where the element was generated (its frame, without scale), its mesh is
+written in that frame, and its own transform is its hand move: Location, Rotation and Scale read 0, 0 and 1 at the
+generated place, and Scale 1.2 means 1.2 times the generated size along that axis. A surface without a place of its
+own (a skin) is written in world space, unparented. A transform that differs from what was written is a hand move, a
+vertex that differs is a sculpt. Handles are empties.
 """
 # pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportUnknownVariableType=false
 # pyright: reportUnknownArgumentType=false, reportMissingTypeStubs=false
@@ -18,11 +21,14 @@ from mathutils import Matrix
 
 from proctune.core import Result, Session
 from proctune.core.element import F64
+from proctune.errors import ProctuneError
 
 ROOT = "proctune"
 HANDLES = "proctune handles"
 ELEMENT_KEY = "proctune_element"
 HANDLE_KEY = "proctune_handle"
+FRAMES = "proctune frames"
+FRAME_KEY = "proctune_frame"
 #: Viewport colours per layer name (RGBA); other layers get grey
 COLOURS: dict[str, tuple[float, float, float, float]] = {
     "bone": (0.91, 0.86, 0.77, 1.0),
@@ -38,6 +44,11 @@ class Written:
     """What was last written, to tell hand edits from our own writes."""
 
     verts: dict[str, F64] = field(default_factory=dict[str, F64])
+    """Object-space vertices"""
+    basis: dict[str, F64] = field(default_factory=dict[str, F64])
+    """The object's own transform (relative to its frame)"""
+    frames: dict[str, F64] = field(default_factory=dict[str, F64])
+    """Where the frame empty was put (4x4, world); identity for unparented elements"""
     handles: dict[str, F64] = field(default_factory=dict[str, F64])
 
 
@@ -83,10 +94,36 @@ def read_verts(obj: bpy.types.Object) -> F64:
     return co.reshape(-1, 3)
 
 
+def world_verts(obj: bpy.types.Object) -> F64:
+    """The object's vertices in world space, from its frame and its own transform (both as set, no depsgraph lag)."""
+    m = np.array(obj.matrix_basis, np.float64)
+    if obj.parent is not None:
+        m = np.array(obj.parent.matrix_world, np.float64) @ m
+    v = read_verts(obj)
+    return v @ m[:3, :3].T + m[:3, 3]
+
+
 def _world(obj: bpy.types.Object) -> F64:
-    """The (unparented) object's transform, from its own location/rotation/scale: matrix_world lags until the next
-    depsgraph update."""
+    """The object's own transform (relative to its frame, if it has one), from its location/rotation/scale:
+    matrix_world lags until the next depsgraph update."""
     return np.array(obj.matrix_basis, np.float64)
+
+
+def frame_objects() -> dict[str, bpy.types.Object]:
+    return {str(o[FRAME_KEY]): o for o in bpy.data.objects if FRAME_KEY in o}
+
+
+def _frame_object(name: str) -> bpy.types.Object:
+    obj = frame_objects().get(name)
+    if obj is None:
+        obj = bpy.data.objects.new(f"{name} frame", None)
+        obj.empty_display_type = "PLAIN_AXES"
+        obj.empty_display_size = 0.01
+        obj[FRAME_KEY] = name
+        _collection(FRAMES, root()).objects.link(obj)
+        obj.hide_select = True
+    obj.hide_set(True)
+    return obj
 
 
 def write(result: Result, written: Written, skip: frozenset[str] = frozenset()) -> None:
@@ -95,39 +132,58 @@ def write(result: Result, written: Written, skip: frozenset[str] = frozenset()) 
     for name, r in result.elements.items():
         if name in skip:
             continue
+        e = r.element
         obj = objs.get(name)
-        verts = r.verts
-        faces = r.faces
         if obj is None:
             me = bpy.data.meshes.new(name)
             obj = bpy.data.objects.new(name, me)
             obj[ELEMENT_KEY] = name
-            layer_collection(r.element.layer).objects.link(obj)
-            me.materials.append(_material(r.element.layer))
+            layer_collection(e.layer).objects.link(obj)
+            me.materials.append(_material(e.layer))
         me = cast(bpy.types.Mesh, obj.data)
         if obj.mode == "EDIT":
             continue  # its edit mesh would overwrite this; it is written after leaving edit mode
-        if len(me.vertices) == len(verts) and len(me.polygons) == len(faces):
+        if e.tweakable:
+            frame = e.frame.rigid()
+            parent = _frame_object(name)
+            parent.matrix_world = Matrix(frame.tolist())
+            d = r.edit.displacement if r.edit.displacement is not None and not r.stale else 0.0
+            verts = (e.local + d) * e.frame.scale
+            obj.parent = parent
+            obj.matrix_parent_inverse = Matrix.Identity(4)
+            obj.matrix_basis = Matrix(r.edit.tweak.matrix(e.frame.scale).tolist())
+        else:
+            frame = np.eye(4)
+            verts = r.verts
+            obj.parent = None
+            obj.matrix_basis = Matrix.Identity(4)
+        if len(me.vertices) == len(verts) and len(me.polygons) == len(e.faces):
             me.vertices.foreach_set("co", verts.astype(np.float32).ravel())
         else:
             me.clear_geometry()
-            me.from_pydata(verts.tolist(), [], faces.tolist())
+            me.from_pydata(verts.tolist(), [], e.faces.tolist())
             me.shade_smooth()
         me.update()
-        obj.matrix_world = Matrix.Identity(4)
         written.verts[name] = verts.astype(np.float32).astype(np.float64)  # as stored in the mesh
+        written.basis[name] = np.array(obj.matrix_basis, np.float64)  # as Blender keeps it (location/rotation/scale)
+        written.frames[name] = frame
     for name, obj in objs.items():
         if name not in result.elements:
             remove(obj)
-            written.verts.pop(name, None)
+            for d in (written.verts, written.basis, written.frames):
+                d.pop(name, None)
 
 
 def remove(obj: bpy.types.Object) -> None:
-    """Remove an object and its mesh (removing only the object would leave the mesh behind, unused, in the file)."""
+    """Remove an element's object, its mesh and its frame (removing only the object would leave the others behind,
+    unused, in the file)."""
     data = obj.data
+    frame = frame_objects().get(str(obj.get(ELEMENT_KEY, "")))
     bpy.data.objects.remove(obj)
     if isinstance(data, bpy.types.Mesh) and data.users == 0:
         bpy.data.meshes.remove(data)
+    if frame is not None:
+        bpy.data.objects.remove(frame)
 
 
 def write_handles(session: Session[object], written: Written, skip: frozenset[str] = frozenset()) -> None:
@@ -162,8 +218,8 @@ def moved_handles(written: Written) -> dict[str, F64]:
 
 @dataclass(frozen=True)
 class HandEdits:
-    moved: dict[str, F64]
-    """Element name to its object's 4x4 world transform, where it is not identity"""
+    moved: dict[str, tuple[F64, F64]]
+    """Element name to its object's transform as written and as it is now (relative to its frame)"""
     sculpted: dict[str, F64]
     """Element name to its vertices (object space), where they differ from what was written"""
 
@@ -172,29 +228,40 @@ class HandEdits:
 
 
 def hand_edits(written: Written) -> HandEdits:
-    moved: dict[str, F64] = {}
+    moved: dict[str, tuple[F64, F64]] = {}
     sculpted: dict[str, F64] = {}
     for name, obj in element_objects().items():
-        m = _world(obj)
-        if not np.allclose(m, np.eye(4), atol=TOLERANCE):
-            moved[name] = m
-        last = written.verts.get(name)
-        if last is None:
+        before = written.basis.get(name)
+        if before is None:
             continue
+        now = _world(obj)
+        if not np.allclose(now, before, atol=1e-6):
+            moved[name] = (before, now)
         v = read_verts(obj)
+        last = written.verts[name]
         if v.shape != last.shape or np.abs(v - last).max() > 1e-6:
             sculpted[name] = v
     return HandEdits(moved, sculpted)
 
 
-def apply_hand_edits(session: Session[object], edits: HandEdits) -> None:
-    """Move tweaks first (they change what a sculpt is measured against), then sculpts. A sculpted object that was
-    also moved is read in world space: its transform applied to its vertices."""
-    for name, m in edits.moved.items():
-        session.capture_transform(name, m)
+def apply_hand_edits(session: Session[object], edits: HandEdits, written: Written) -> list[ProctuneError]:
+    """Moves first (they change what a sculpt is measured against), then sculpts. Each is captured on its own: one
+    that cannot be kept is returned as an error and the next write puts that object back, so it is reported once
+    instead of failing every rebuild after it."""
+    errors: list[ProctuneError] = []
+    for name, (before, now) in edits.moved.items():
+        frame = written.frames.get(name, np.eye(4))
+        world_move = frame @ now @ np.linalg.inv(before) @ np.linalg.inv(frame)
+        try:
+            session.capture_transform(name, world_move)
+        except ProctuneError as e:
+            errors.append(e)
     if edits.moved:
         session.evaluate()
     for name, v in edits.sculpted.items():
-        m = edits.moved.get(name, np.eye(4))
-        world = v @ m[:3, :3].T + m[:3, 3]
-        session.capture_sculpt(name, world)
+        to_world = written.frames.get(name, np.eye(4)) @ edits.moved.get(name, (None, written.basis[name]))[1]
+        try:
+            session.capture_sculpt(name, v @ to_world[:3, :3].T + to_world[:3, 3])
+        except ProctuneError as e:
+            errors.append(e)
+    return errors

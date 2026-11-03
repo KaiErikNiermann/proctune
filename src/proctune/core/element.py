@@ -8,8 +8,7 @@ means half way along at any length.
 Edits live in those coordinates and are re-applied on every rebuild, which is what makes them survive parameter
 changes:
 
-- a *tweak*: an affine map $T(l) = L\,l + t$ in normalized coordinates (the element moved, turned or scaled by
-  hand);
+- a *tweak*: the element moved, turned or scaled by hand (`Tweak`: translation, rotation and scale in its frame);
 - a *sculpt*: a displacement per vertex $d_i$. For a movable element it is in normalized coordinates, before the
   tweak, so it moves with the element: $w_i = F(T(l_i + d_i))$. An element that cannot be moved as a whole (a skin
   following a bending limb) gives each vertex its own frame instead (`vertex_axes`, `vertex_scale`, e.g. along and
@@ -25,6 +24,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
+
+from proctune.errors import EditError
 
 type F64 = NDArray[np.float64]
 type I32 = NDArray[np.int32]
@@ -49,27 +50,73 @@ class Frame:
     def to_local(self, world: F64) -> F64:
         return ((world - self.origin) @ self.axes) / self.scale
 
+    def rigid(self) -> F64:
+        """4x4: the frame's place and orientation, without its scale (where its element's object is parented)."""
+        m = np.eye(4)
+        m[:3, :3] = self.axes
+        m[:3, 3] = self.origin
+        return m
+
 
 @dataclass(frozen=True)
 class Tweak:
-    """An affine map in an element's normalized coordinates: $T(l) = L\\,l + t$."""
+    r"""A hand move of an element relative to where it was generated, in the terms Blender shows an object's transform:
+    a translation, a rotation and a scale along the element's own axes. In the element's frame, in metres
+    ($p = s \odot l$ for its size $s$): $p' = R\,(k \odot p) + s \odot t$. The translation $t$ is in element sizes, so
+    a muscle moved by a tenth of its length stays a tenth of its length away when it grows; rotation and scale are
+    exactly what the object's Rotation and Scale fields show."""
 
-    linear: F64 = field(default_factory=lambda: np.eye(3))
     offset: F64 = field(default_factory=lambda: np.zeros(3))
+    """Translation, in element sizes along its axes"""
+    rotation: F64 = field(default_factory=lambda: np.eye(3))
+    scale: F64 = field(default_factory=lambda: np.ones(3))
 
-    def apply(self, local: F64) -> F64:
-        return local @ self.linear.T + self.offset
+    def matrix(self, size: F64) -> F64:
+        """4x4 in the element's frame, metres: what its object's transform is relative to its generated place."""
+        m = np.eye(4)
+        m[:3, :3] = self.rotation * self.scale[None, :]
+        m[:3, 3] = size * self.offset
+        return m
 
-    def invert(self, local: F64) -> F64:
-        return np.linalg.solve(self.linear, (local - self.offset).T).T
+    @staticmethod
+    def from_matrix(m: F64, size: F64) -> Tweak:
+        """The tweak of a transform in the element's frame (polar decomposition: rotation times a stretch; a stretch
+        off the element's axes, which Blender's location/rotation/scale cannot make, keeps only its diagonal)."""
+        from scipy.linalg import polar  # noqa: PLC0415
 
-    def then(self, other: Tweak) -> Tweak:
-        """This tweak followed by `other`."""
-        return Tweak(other.linear @ self.linear, other.linear @ self.offset + other.offset)
+        rot, stretch = polar(m[:3, :3])
+        k = np.diag(stretch).copy()
+        if np.linalg.det(rot) < 0:  # a mirror: keep it in the scale, as Blender does
+            rot[:, 2] *= -1
+            k[2] *= -1
+        return Tweak(m[:3, 3] / size, np.asarray(rot, np.float64), k)
+
+    def apply(self, local: F64, size: F64) -> F64:
+        p = local * size
+        return ((p * self.scale) @ self.rotation.T + size * self.offset) / size
+
+    def invert(self, local: F64, size: F64) -> F64:
+        p = local * size - size * self.offset
+        return (p @ self.rotation) / self.scale / size
 
     @property
     def identity(self) -> bool:
-        return bool(np.allclose(self.linear, np.eye(3)) and np.allclose(self.offset, 0.0))
+        return bool(
+            np.allclose(self.offset, 0.0) and np.allclose(self.rotation, np.eye(3)) and np.allclose(self.scale, 1.0)
+        )
+
+    def describe(self, size: F64) -> str:
+        """In words, for the panel: how far it moved (mm), how far it turned (degrees), how it was scaled."""
+        parts: list[str] = []
+        moved = float(np.linalg.norm(size * self.offset)) * 1000
+        if moved > 0.05:
+            parts.append(f"moved {moved:.1f} mm")
+        angle = float(np.degrees(np.arccos(np.clip((np.trace(self.rotation) - 1) / 2, -1.0, 1.0))))
+        if angle > 0.05:
+            parts.append(f"turned {angle:.1f} deg")
+        if not np.allclose(self.scale, 1.0):
+            parts.append("scaled " + " x ".join(f"{k:.2f}" for k in self.scale))
+        return ", ".join(parts) or "no move"
 
 
 @dataclass(frozen=True)
@@ -127,10 +174,10 @@ def resolve(e: Element, edit: Edit | None) -> Resolved:
     d = edit.displacement
     stale = d is not None and d.shape != e.local.shape
     if d is None or stale:
-        local = edit.tweak.apply(e.local) if e.tweakable else e.local
+        local = edit.tweak.apply(e.local, e.frame.scale) if e.tweakable else e.local
         return Resolved(e, e.frame.to_world(local), edit, stale)
     if e.tweakable:
-        return Resolved(e, e.frame.to_world(edit.tweak.apply(e.local + d)), edit)
+        return Resolved(e, e.frame.to_world(edit.tweak.apply(e.local + d, e.frame.scale)), edit)
     assert e.vertex_axes is not None and e.vertex_scale is not None
     offset = np.einsum("nij,nj->ni", e.vertex_axes, d * e.vertex_scale)
     return Resolved(e, e.frame.to_world(e.local) + offset, edit)
@@ -139,19 +186,18 @@ def resolve(e: Element, edit: Edit | None) -> Resolved:
 def capture_sculpt(e: Element, tweak: Tweak, world: F64) -> F64:
     """The sculpt that turns the element (with `tweak`) into `world` (n, 3): the inverse of `resolve`."""
     if world.shape != e.local.shape:
-        raise ValueError(f"{e.name}: {len(world)} vertices, the element has {len(e.local)}")
+        raise EditError(
+            f"{e.name}: the edited mesh has {len(world)} vertices, the element {len(e.local)}",
+            "a sculpt cannot add or remove vertices (no Dyntopo, Remesh or Decimate on generated meshes); undo it",
+        )
     if e.tweakable:
-        return tweak.invert(e.frame.to_local(world)) - e.local
+        return tweak.invert(e.frame.to_local(world), e.frame.scale) - e.local
     assert e.vertex_axes is not None and e.vertex_scale is not None
     return np.einsum("nji,nj->ni", e.vertex_axes, world - e.frame.to_world(e.local)) / e.vertex_scale
 
 
-def capture_tweak(e: Element, matrix: F64) -> Tweak:
-    r"""A world-space affine move of the element (4x4 `matrix`, e.g. its object's transform) as a tweak in its
-    normalized coordinates: $l \mapsto S^{-1} A^\top (M (o + A S l) - o)$."""
-    m3, mt = matrix[:3, :3], matrix[:3, 3]
-    f = e.frame
-    to_local = f.axes.T / f.scale[:, None]
-    linear = to_local @ m3 @ f.axes * f.scale[None, :]
-    offset = to_local @ (m3 @ f.origin + mt - f.origin)
-    return Tweak(linear, offset)
+def capture_tweak(e: Element, matrix: F64, current: Tweak) -> Tweak:
+    """The element moved by a world-space 4x4 `matrix` on top of its `current` tweak."""
+    rigid = e.frame.rigid()
+    local = np.linalg.inv(rigid) @ matrix @ rigid @ current.matrix(e.frame.scale)
+    return Tweak.from_matrix(local, e.frame.scale)
