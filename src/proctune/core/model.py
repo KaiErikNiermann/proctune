@@ -1,5 +1,7 @@
 """What a model provides: its parameters, the stages that generate its elements, composites and handles.
 
+A model may also implement `Binds`, turning a hand move of an element into parameter changes.
+
 A model is built in stages, each seeing the elements of the stages before it *with their edits applied*: a scaffold
 (a skeleton), structure placed on it (muscles, fat), then a surface over everything (a skin). So a sculpted muscle
 shows through the skin, and the skin can be sculpted in turn.
@@ -48,6 +50,16 @@ class Handle[P]:
     drag: Callable[[P, F64], P]
     edits: tuple[Path, ...] = ()
     """Parameters the handle changes, for the UI"""
+
+
+class Binds[P](Protocol):
+    """A model whose elements can be moved by hand into parameter changes (a bone scaled along itself changes its
+    length; the lower bone turned about the joint changes the joint's angle)."""
+
+    def bind(self, p: P, element: str, matrix: F64) -> P | None:
+        """The parameters after `element` was moved by the world-space 4x4 `matrix`, or None if that element's moves
+        are not parameters (they are then kept as a tweak)."""
+        ...
 
 
 class Model[P](Protocol):

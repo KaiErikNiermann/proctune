@@ -7,9 +7,11 @@ file, so a project opens anywhere the model's code is.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import reduce
 from pathlib import Path as FsPath
@@ -19,9 +21,12 @@ import numpy as np
 
 from proctune.core import params as P
 from proctune.core.element import Edit, Element, Resolved, Tweak, capture_sculpt, capture_tweak, resolve
-from proctune.core.model import F64, Handle, Model
+from proctune.core.model import F64, Binds, Handle, Model
 
 FORMAT = 1
+type Track = tuple[tuple[float, float], ...]
+"""(frame, value) samples"""
+COMPOSITE = "composite:"
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,11 @@ class Session[T]:
     base: T
     composites: dict[str, float] = field(default_factory=dict[str, float])
     edits: dict[str, Edit] = field(default_factory=dict[str, Edit])
+    tracks: dict[str, tuple[tuple[float, float], ...]] = field(
+        default_factory=dict[str, tuple[tuple[float, float], ...]]
+    )
+    """Values over time: a dotted parameter path (or ``composite:NAME``) to (frame, value) samples, e.g. baked from
+    Blender keyframes; `at_frame` interpolates them"""
     source: str = ""
     """``module:attribute`` of the model, kept for saving"""
     import_paths: tuple[str, ...] = ()
@@ -71,6 +81,20 @@ class Session[T]:
         if name not in {c.name for c in self.model.composites}:
             raise KeyError(f"no composite {name!r}")
         self.composites[name] = value
+
+    def apply(self, values: Mapping[str, P.Value]) -> None:
+        """Set values by dotted path (``upper.length``) or ``composite:NAME``."""
+        for name, v in values.items():
+            if name.startswith(COMPOSITE):
+                self.set_composite(name.removeprefix(COMPOSITE), float(cast(float, v)))
+            else:
+                self.set(tuple(name.split(".")), v)
+
+    def at_frame(self, frame: float) -> Session[T]:
+        """A copy with every track's value at `frame` (linear between samples, held beyond them)."""
+        c = dataclasses.replace(self, composites=dict(self.composites), last=None)
+        c.apply({n: float(np.interp(frame, [f for f, _ in t], [v for _, v in t])) for n, t in self.tracks.items()})
+        return c
 
     def handles(self) -> tuple[Handle[T], ...]:
         """The handles, placed at the effective parameters (where the model is drawn)."""
@@ -112,8 +136,15 @@ class Session[T]:
         self.edits[name] = Edit(edit.tweak, capture_sculpt(r.element, edit.tweak, world))
 
     def capture_transform(self, name: str, matrix: F64) -> None:
-        """Compose a world-space move of the element (4x4) into its tweak."""
+        """A world-space move of the element (4x4): parameter changes if the model binds that element, otherwise
+        composed into its tweak."""
         r = self._resolved(name)
+        bind = getattr(self.model, "bind", None)
+        if bind is not None:
+            bound = cast(Binds[T], self.model).bind(self.base, name, matrix)
+            if bound is not None:
+                self.base = bound
+                return
         if not r.element.tweakable:
             raise ValueError(f"{name} cannot be moved as a whole")
         edit = self.edits.get(name, Edit())
@@ -139,6 +170,7 @@ class Session[T]:
             "import_paths": list(self.import_paths),
             "params": P.to_dict(self.base),
             "composites": self.composites,
+            "tracks": {n: [list(fv) for fv in t] for n, t in self.tracks.items()},
             "tweaks": {
                 n: {"linear": e.tweak.linear.tolist(), "offset": e.tweak.offset.tolist()}
                 for n, e in self.edits.items()
@@ -162,6 +194,8 @@ class Session[T]:
         s = Session.new(model, doc["model"], paths)
         s.base = P.from_dict(cast(type[Any], type(s.base)), doc.get("params", {}))
         s.composites.update(cast(dict[str, float], doc.get("composites", {})))
+        tracks = cast(dict[str, list[list[float]]], doc.get("tracks", {}))
+        s.tracks = {n: tuple((float(f), float(v)) for f, v in t) for n, t in tracks.items()}
         tweaks = cast(dict[str, dict[str, list[Any]]], doc.get("tweaks", {}))
         for n, t in tweaks.items():
             s.edits[n] = Edit(Tweak(np.array(t["linear"], np.float64), np.array(t["offset"], np.float64)))
