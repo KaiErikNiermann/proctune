@@ -58,15 +58,47 @@ class MyModel:
 
 `examples/limb/limb.py` is a complete model: two bones and a joint, a muscle with a bell-shaped belly across the joint, a fat deposit along each bone, a skin swept over everything, growth and fat curves, the composites `flex` (bend and bunch the muscle) and `size`, handles at the elbow and wrist, and bone moves bound to parameters.
 
+## Platforms
+
+| | Linux | Windows |
+| --- | --- | --- |
+| The add-on in Blender 5.0 or newer | supported, tested | supported, tested in CI (unit and add-on tests under the `bpy` wheel) |
+| End-to-end tests in the Blender GUI | tested (Xvfb) | not run: they need a virtual X display |
+| Development (scripts, test suite) | yes | no |
+
+Nothing in the add-on hardcodes a path. Blender's own interpreter, its user `scripts/modules` folder and the config folder are looked up at run time; projects store their model's folder relative to the project file (absolute only across Windows drives, where no relative path exists).
+
+## Installing
+
+The add-on needs numpy (every Blender has it) and scipy (for curve parameters); a model may need more (the limb example: trimesh). Missing packages are never a silent failure: the panel names them and offers **Install missing packages**, which runs pip with Blender's own Python into Blender's user `scripts/modules` (or the configured `packages` folder), leaving out what Blender already has, so its numpy is never shadowed. The same from a terminal:
+
+```sh
+blender -b --python-expr "from proctune import deps; deps.install_into_blender(['scipy', 'trimesh'])"
+python -m proctune.deps scipy trimesh        # for a plain Python, into its user site-packages
+```
+
+Official Blender builds that ship without pip get it bootstrapped with `ensurepip` on first use.
+
+## Configuration
+
+Optional, per machine: `~/.config/proctune/config.toml` on Linux (`$XDG_CONFIG_HOME`), `%APPDATA%\proctune\config.toml` on Windows, or the file `PROCTUNE_CONFIG` names. Environment variables win over the file.
+
+| Key | Environment | Default | What |
+| --- | --- | --- | --- |
+| `blender` | `PROCTUNE_BLENDER` | `blender` | The Blender executable (dev scripts, tests) |
+| `packages` | `PROCTUNE_PACKAGES` | Blender's user `scripts/modules` | Where missing packages are installed |
+| `dev_site` | `PROCTUNE_DEV_SITE` | `.blender-site` in the checkout | Packages for the dev scripts and tests |
+| `xvfb_run` | `PROCTUNE_XVFB_RUN` | `xvfb-run` | Virtual display wrapper (end-to-end tests) |
+| `magick` | `PROCTUNE_MAGICK` | `magick` | ImageMagick 7; `import` for ImageMagick 6 |
+
 ## Using it in Blender
 
 ```sh
-scripts/gui.sh                               # opens examples/limb/limb.json
-scripts/gui.sh path/to/project.json
+python scripts/gui.py                        # opens examples/limb/limb.json (Linux, from a checkout)
+python scripts/gui.py path/to/project.json
 ```
 
-The first run installs what the example models import (scipy, trimesh, optuna) into `.blender-site` for Blender's own Python. The panel is in the 3D view's sidebar, tab "proctune":
-
+The first run installs what the example models import (scipy, trimesh, optuna) into the dev site folder, through Blender's own Python. The panel is in the 3D view's sidebar, tab "proctune":
 - sliders for every parameter, grouped as the parameter dataclasses are, and for every composite;
 - a curve widget for every curve parameter;
 - layer visibility toggles;
@@ -74,6 +106,15 @@ The first run installs what the example models import (scipy, trimesh, optuna) i
 - Open, New (from a `module:attribute`), Save, Rebuild, Reset parameters.
 
 Move, rotate or scale an element with the usual tools, or sculpt or edit it: the change is captured when the grab or stroke ends, and the stages after it rebuild (the skin follows a muscle stroke by stroke). Drag a handle empty to set the parameters it is bound to. A project saves as `NAME.json` (parameters, composites, tweaks, tracks) and `NAME.npz` (sculpts).
+
+## When something goes wrong
+
+Every failure proctune can cause says what went wrong and what to do (`proctune.errors`: `ProjectError`, `ModelError`, `MissingDependenciesError`, each with a `remedy`). In Blender it appears in a red box at the top of the panel, and operators report it in the status bar; a failed rebuild keeps the last good mesh. Nothing Blender calls on its own (timers, handlers, slider callbacks, panel drawing) can fail silently: each is guarded, logs the traceback and shows the error in the panel. Covered by tests (`tests/test_errors.py`, `tests/test_stress.py`):
+
+- saving into a read-only folder, over a read-only file, into a missing folder, or onto a full disk: nothing half-written is left, the old project stays as it was (every file is written to a temporary file and moved into place);
+- opening a missing file, broken JSON (with line and column), another format, unknown parameters, values outside their ranges (each listed), invalid curves, a corrupt sculpt file;
+- a model module that is not found (with the folders searched), imports a package Blender lacks (named, with the install command), fails on import, or fails while building (with the stage);
+- an interpreter that cannot be started, pip failing, an unreadable config file or unknown config keys.
 
 ## Tuning against targets
 
@@ -90,13 +131,22 @@ The search space is the parameters' own slider ranges, selected by dotted path p
 
 ## Development
 
+Linux only. Python 3.13, Poetry, and for the end-to-end tests Blender, Xvfb (`xvfb-run`) and ImageMagick.
+
 ```sh
 poetry install --with dev,blender
-poetry run pytest            # core, the add-on under the bpy module, an Optuna fit, and end to end in the GUI
+poetry run pytest            # everything: core, add-on under the bpy wheel, errors, leaks, Optuna fit, end to end
+poetry run pytest benchmarks # timings (pytest-benchmark), not part of the default run
 scripts/checks.sh            # ruff, pyright (strict), pytest; run by the pre-push hook
 ```
 
-The core (`proctune.core`) has no Blender dependency. The add-on (`proctune.blender`) is tested headless with the `bpy` wheel, and end to end (`tests/test_e2e.py`, about 70 s) in the real Blender GUI on a virtual display: `tests/e2e/driver.py` grabs the muscle with G and the mouse, sculpts it with a real brush stroke, moves a slider while in Sculpt Mode, drags the wrist handle, turns the lower bone with R and stretches the upper one with S Y, edits a fat curve, steps a keyframed growth through the timeline with the arrow keys, and saves, all through simulated input (`--enable-event-simulate`) and the add-on's own timers and handlers. It also fails on any traceback from proctune in Blender's output, since Blender only prints errors from handlers, timers and panel drawing. It needs `blender`, `xvfb-run` (Arch: `xorg-server-xvfb`) and `magick` (`imagemagick`, for screenshots) and is skipped without them; `PROCTUNE_E2E_KEEP=DIR` keeps its screenshots.
+The end-to-end suite (`tests/test_e2e.py`, about 70 s) runs the real Blender GUI on a virtual display: `tests/e2e/driver.py` grabs the muscle with G and the mouse, sculpts it with a real brush stroke, moves a slider while in Sculpt Mode, drags the wrist handle, turns the lower bone with R and stretches the upper one with S Y, edits a fat curve, steps a keyframed growth through the timeline with the arrow keys, and saves, all through simulated input (`--enable-event-simulate`) and the add-on's own timers and handlers. It fails on any traceback from proctune in Blender's output. Without its tools it is skipped, unless `PROCTUNE_E2E_REQUIRED=1` (set in CI), where it fails instead; `PROCTUNE_E2E_KEEP=DIR` keeps its screenshots.
+
+CI (GitHub Actions) runs lint and type checks, the tests on Linux and Windows, and the end-to-end suite on Linux with the official Blender build.
+
+### Performance and leaks
+
+Medians on a Ryzen 9 9900X3D with Blender 5.2.3, from `poetry run pytest benchmarks`: a full rebuild in Blender (capture hand edits, evaluate, write every mesh, place handles, sync sliders) 9.8 ms; evaluating the limb in plain Python 6.3 ms, the same with every element sculpted; the skin stage 2.3 ms; detecting hand edits 0.7 ms; capturing a sculpt 0.09 ms; saving and loading a project with sculpts 10 ms; a curve at 100,000 points 0.5 ms. Rebuild time per element stays flat from 20 to 400 elements (`test_rebuild_time_is_linear_in_the_element_count`). Over 300 rebuilds Python memory grows by less than 2 MB, resident memory by less than 40 MB, and Blender's data (objects, meshes, materials, node groups, collections, images) not at all; reopening a project 15 times and registering the add-on 10 times leave nothing behind.
 
 ## Known limits
 
@@ -105,4 +155,4 @@ The core (`proctune.core`) has no Blender dependency. The add-on (`proctune.blen
 
 ## Licence
 
-Not chosen yet. Blender requires add-ons that use its Python API to be GPL-3.0-or-later, which is what `blender_manifest.toml` declares; `proctune.core` does not use that API and could be licensed permissively.
+GPL-3.0-or-later (`LICENSE`), as Blender requires of add-ons that use its Python API.
