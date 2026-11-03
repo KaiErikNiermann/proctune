@@ -24,9 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from proctune.core import params as P
-from proctune.core.session import Result, Session
-
-COMPOSITE = "composite:"
+from proctune.core.session import COMPOSITE, Result, Session
 
 
 class Trial(Protocol):
@@ -75,8 +73,8 @@ def space(
     dims: list[Dimension] = []
     for spec in P.specs(session.base):
         name = ".".join(spec.path)
-        if not wanted(name):
-            continue
+        if not wanted(name) or spec.kind == "curve":
+            continue  # curves are drawn, not searched
         if spec.kind == "bool":
             dims.append(Dimension(name, "bool", 0, 1))
             continue
@@ -102,16 +100,14 @@ def sample(sp: Space, trial: Trial) -> dict[str, P.Value]:
                 out[d.name] = trial.suggest_int(d.name, int(d.low), int(d.high), step=int(d.step or 1))
             case "float":
                 out[d.name] = trial.suggest_float(d.name, d.low, d.high, step=d.step)
+            case "curve":  # never in a space (see `space`)
+                raise ValueError(f"{d.name}: curves are not searched")
     return out
 
 
 def apply(session: Session[Any], values: Mapping[str, P.Value]) -> None:
     """Write tuned values (dotted paths, ``composite:NAME``) into the session, e.g. ``study.best_params``."""
-    for name, v in values.items():
-        if name.startswith(COMPOSITE):
-            session.set_composite(name.removeprefix(COMPOSITE), float(v))
-        else:
-            session.set(tuple(name.split(".")), v)
+    session.apply(values)
 
 
 def candidate[T](session: Session[T], values: Mapping[str, P.Value]) -> Session[T]:

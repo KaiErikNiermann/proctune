@@ -3,7 +3,7 @@ name = "proctune"
 version = "0.1.0"
 description = "Live sliders, handles and regeneration-proof sculpting for procedural models in Blender"
 requires-python = ">=3.13,<3.15"
-dependencies = ["numpy (>=2.3,<3.0)"]
+dependencies = ["numpy (>=2.3,<3.0)", "scipy (>=1.15,<2.0)"]
 
 [project.optional-dependencies]
 # proctune.core.tune works with any optimizer whose trials look like Optuna's; Optuna is the one tested

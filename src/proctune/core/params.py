@@ -1,7 +1,7 @@
 """Parameters as frozen dataclasses, instrumented by annotation.
 
 A model's parameters are a frozen dataclass whose fields are numbers annotated with a `Range`
-(``Annotated[float, Range(0.1, 0.6, unit="m")]``), booleans, or nested parameter dataclasses (a group).
+(``Annotated[float, Range(0.1, 0.6, unit="m")]``), booleans, `Curve`s, or nested parameter dataclasses (a group).
 `specs` walks the tree into flat `Spec`s that a UI turns into sliders; `get` and `replace` address one
 value by its path; `to_dict`/`from_dict` move the tree to and from JSON.
 """
@@ -13,9 +13,11 @@ import typing
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from proctune.core.curves import Curve
+
 type Path = tuple[str, ...]
-type Kind = Literal["float", "int", "bool"]
-type Value = float | int | bool
+type Kind = Literal["float", "int", "bool", "curve"]
+type Value = float | int | bool | Curve
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,9 @@ def specs(obj: object, prefix: Path = ()) -> tuple[Spec, ...]:
     for f in dataclasses.fields(obj):
         value: object = getattr(obj, f.name)
         path = (*prefix, f.name)
+        if isinstance(value, Curve):
+            out.append(Spec(path, "curve", value, None))
+            continue
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             out += specs(value, path)
             continue
@@ -118,6 +123,25 @@ def from_dict[T](cls: type[T], data: dict[str, Any]) -> T:
         tp = hints[name]
         if typing.get_origin(tp) is typing.Annotated:
             tp = typing.get_args(tp)[0]
+        if tp is Curve:
+            c = cast(dict[str, Any], value)
+            pts = tuple((float(x), float(y)) for x, y in cast(list[list[float]], c["points"]))
+            kwargs[name] = Curve(pts, float(c.get("lo", 0.0)), float(c.get("hi", 1.0)))
+            continue
         is_group = isinstance(tp, type) and dataclasses.is_dataclass(tp)
         kwargs[name] = from_dict(cast(type, tp), cast(dict[str, Any], value)) if is_group else value
     return cls(**kwargs)
+
+
+def range_of(cls: type, name: str) -> Range | None:
+    """The `Range` a parameter class gives one of its fields."""
+    tp = _hints(cls)[name]
+    if typing.get_origin(tp) is typing.Annotated:
+        return next((a for a in typing.get_args(tp)[1:] if isinstance(a, Range)), None)
+    return None
+
+
+def clamp(obj: object, name: str, value: float) -> float:
+    """`value` held to the range of field `name` of `obj`'s class (unchanged if it has none)."""
+    r = range_of(type(obj), name)
+    return value if r is None else min(max(value, r.lo), r.hi)
