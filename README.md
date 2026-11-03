@@ -79,16 +79,16 @@ The search space is the parameters' own slider ranges, selected by dotted path p
 
 ```sh
 poetry install --with dev,blender
-poetry run pytest            # core tests, the add-on under the bpy module, and an Optuna fit
+poetry run pytest            # core, the add-on under the bpy module, an Optuna fit, and end to end in the GUI
 scripts/checks.sh            # ruff, pyright (strict), pytest; run by the pre-push hook
 ```
 
-The core (`proctune.core`) has no Blender dependency. The add-on (`proctune.blender`) is tested headless with the `bpy` wheel.
+The core (`proctune.core`) has no Blender dependency. The add-on (`proctune.blender`) is tested headless with the `bpy` wheel, and end to end (`tests/test_e2e.py`, about 40 s) in the real Blender GUI on a virtual display: `tests/e2e/driver.py` grabs the muscle with G and the mouse, sculpts it with a real brush stroke, moves a slider while in Sculpt Mode, drags the wrist handle and saves, all through simulated input (`--enable-event-simulate`) and the add-on's own timer and depsgraph handler. It needs `blender`, `xvfb-run` (Arch: `xorg-server-xvfb`) and `magick` (`imagemagick`, for screenshots) and is skipped without them; `PROCTUNE_E2E_KEEP=DIR` keeps its screenshots.
 
-## Not verified yet
+## Known limits
 
-- Sculpt mode: the add-on writes the sculpted object's vertices while it is in Sculpt Mode when a slider changes. Whether Blender redraws them without leaving the mode has not been checked by eye.
 - Handles with composites active: a handle writes base parameters through the model's `drag`, which sees the base parameters, so with a composite applied the handle and the drawn model can disagree until the composite is back at its default.
+- Sliders are driven through their properties in the end-to-end test, not by clicking them: Blender has no API for a button's position on screen.
 
 ## Licence
 
