@@ -20,6 +20,18 @@ On a rebuild the model regenerates every element from the parameters and the edi
 
 A model must keep each element's topology fixed (same vertex count and order for all parameter values). A sculpt stored for another topology is reported as stale and not applied.
 
+Some hand moves are better read as parameters than kept as moves. A model that implements `bind(p, element, matrix)` turns them into parameter changes: in the limb, scaling a bone along itself sets its length, scaling it across sets its radius, and turning the lower bone about the joint sets the joint's angle. Everything built on the skeleton then follows, and the move itself springs back to the regenerated bone. Other elements' moves stay tweaks.
+
+## Curves, growth and time
+
+A parameter can be a `Curve`: control points on $x \in [0, 1]$ through which a monotone piecewise cubic (scipy's `PchipInterpolator`) is drawn, so it passes through every point and never overshoots. Curves describe how strongly one structure responds to a driver. In the limb, `growth.stage` (think age) drives the overall size through a growth curve that rises fast and then plateaus; each fat deposit has its own curve from overall adiposity to thickness, one filling in early and mildly, the other late and steeply.
+
+For growth relative to another structure there is `allometric(x, b)`, the standard $y = a\,x^{b}$: in the limb the muscle's girth grows as size$^{1.4}$, faster than the bones.
+
+In Blender each curve is edited in Blender's own curve widget in the panel (it lives on a Float Curve node in a node group nothing else uses, as Blender's curve editor cannot be an add-on property). The widget only edits the points; the curve is evaluated by PCHIP everywhere, so Blender and a headless run agree. The widget draws its own spline through the same points, 0.007 to 0.033 apart from the evaluated one on the example's curves.
+
+Any slider or composite can be keyframed, and the model follows the timeline: a frame-change handler rebuilds with the animated values. On save the animated values are sampled once per frame into the project's `tracks`, and `Session.at_frame(f)` gives the model at any frame without Blender. Sculpts and moves carry through all of this, since they are stored relative to each element's size.
+
 ## Writing a model
 
 ```python
@@ -44,7 +56,7 @@ class MyModel:
         ...
 ```
 
-`examples/limb/limb.py` is a complete model: two bones and a joint, a muscle with a bell-shaped belly across the joint, a skin swept over both, the composites `flex` (bend and bunch the muscle) and `size`, and handles at the elbow and wrist.
+`examples/limb/limb.py` is a complete model: two bones and a joint, a muscle with a bell-shaped belly across the joint, a fat deposit along each bone, a skin swept over everything, growth and fat curves, the composites `flex` (bend and bunch the muscle) and `size`, handles at the elbow and wrist, and bone moves bound to parameters.
 
 ## Using it in Blender
 
@@ -56,11 +68,12 @@ scripts/gui.sh path/to/project.json
 The first run installs what the example models import (scipy, trimesh, optuna) into `.blender-site` for Blender's own Python. The panel is in the 3D view's sidebar, tab "proctune":
 
 - sliders for every parameter, grouped as the parameter dataclasses are, and for every composite;
+- a curve widget for every curve parameter;
 - layer visibility toggles;
 - the hand edits per element, each with a button to clear it;
 - Open, New (from a `module:attribute`), Save, Rebuild, Reset parameters.
 
-Move, rotate or scale an element with the usual tools, or sculpt or edit it: the change is captured when the grab or stroke ends, and the stages after it rebuild (the skin follows a muscle stroke by stroke). Drag a handle empty to set the parameters it is bound to. A project saves as `NAME.json` (parameters, composites, tweaks) and `NAME.npz` (sculpts).
+Move, rotate or scale an element with the usual tools, or sculpt or edit it: the change is captured when the grab or stroke ends, and the stages after it rebuild (the skin follows a muscle stroke by stroke). Drag a handle empty to set the parameters it is bound to. A project saves as `NAME.json` (parameters, composites, tweaks, tracks) and `NAME.npz` (sculpts).
 
 ## Tuning against targets
 
@@ -83,12 +96,12 @@ poetry run pytest            # core, the add-on under the bpy module, an Optuna 
 scripts/checks.sh            # ruff, pyright (strict), pytest; run by the pre-push hook
 ```
 
-The core (`proctune.core`) has no Blender dependency. The add-on (`proctune.blender`) is tested headless with the `bpy` wheel, and end to end (`tests/test_e2e.py`, about 40 s) in the real Blender GUI on a virtual display: `tests/e2e/driver.py` grabs the muscle with G and the mouse, sculpts it with a real brush stroke, moves a slider while in Sculpt Mode, drags the wrist handle and saves, all through simulated input (`--enable-event-simulate`) and the add-on's own timer and depsgraph handler. It needs `blender`, `xvfb-run` (Arch: `xorg-server-xvfb`) and `magick` (`imagemagick`, for screenshots) and is skipped without them; `PROCTUNE_E2E_KEEP=DIR` keeps its screenshots.
+The core (`proctune.core`) has no Blender dependency. The add-on (`proctune.blender`) is tested headless with the `bpy` wheel, and end to end (`tests/test_e2e.py`, about 70 s) in the real Blender GUI on a virtual display: `tests/e2e/driver.py` grabs the muscle with G and the mouse, sculpts it with a real brush stroke, moves a slider while in Sculpt Mode, drags the wrist handle, turns the lower bone with R and stretches the upper one with S Y, edits a fat curve, steps a keyframed growth through the timeline with the arrow keys, and saves, all through simulated input (`--enable-event-simulate`) and the add-on's own timers and handlers. It also fails on any traceback from proctune in Blender's output, since Blender only prints errors from handlers, timers and panel drawing. It needs `blender`, `xvfb-run` (Arch: `xorg-server-xvfb`) and `magick` (`imagemagick`, for screenshots) and is skipped without them; `PROCTUNE_E2E_KEEP=DIR` keeps its screenshots.
 
 ## Known limits
 
 - Handles with composites active: a handle writes base parameters through the model's `drag`, which sees the base parameters, so with a composite applied the handle and the drawn model can disagree until the composite is back at its default.
-- Sliders are driven through their properties in the end-to-end test, not by clicking them: Blender has no API for a button's position on screen.
+- Sliders and curve widgets are driven through their data in the end-to-end test, not by clicking them: Blender has no API for a button's position on screen. For the panel screenshot the driver shows the panel in the sidebar tab that is open, since simulated Ctrl+wheel switched tabs only once.
 
 ## Licence
 
