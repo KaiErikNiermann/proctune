@@ -2,6 +2,8 @@
 name = "proctune"
 version = "0.1.0"
 description = "Live sliders, handles and regeneration-proof sculpting for procedural models in Blender"
+license = "GPL-3.0-or-later"
+readme = "README.md"
 requires-python = ">=3.13,<3.15"
 dependencies = ["numpy (>=2.3,<3.0)", "scipy (>=1.15,<2.0)"]
 
@@ -21,6 +23,8 @@ trimesh = "^5.2.0"
 fake-bpy-module = "^20261031"
 scipy-stubs = "^1.18.1.1"
 optuna = "^5.0.0"
+pytest-benchmark = "^5.3.1"
+psutil = "^7.2.2"
 
 [tool.poetry.group.blender.dependencies]
 bpy = { version = "==5.2.3", python = ">=3.13,<3.14" }
