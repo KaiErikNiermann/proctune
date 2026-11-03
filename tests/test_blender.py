@@ -124,3 +124,12 @@ def test_a_hand_move_schedules_a_rebuild(project: None) -> None:
     assert addon.STATE.pending
     addon.STATE.pending = False
     bpy.app.timers.unregister(addon._tick)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_loading_a_blend_does_not_run_its_project(project: None, tmp_path: Path) -> None:
+    """A .blend naming a project only offers it: opening the project imports and runs model code."""
+    addon.save_project(tmp_path / "limb.json")
+    bpy.ops.wm.save_as_mainfile(filepath=str(tmp_path / "scene.blend"))
+    bpy.ops.wm.open_mainfile(filepath=str(tmp_path / "scene.blend"))
+    assert addon.STATE.session is None
+    assert addon.STATE.stored == tmp_path / "limb.json"

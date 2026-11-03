@@ -53,6 +53,8 @@ class State:
     dragged: frozenset[str] = frozenset()
     last_ms: float = 0.0
     message: str = ""
+    stored: Path | None = None
+    """The project a loaded .blend names, offered in the panel; never opened by itself"""
 
 
 STATE = State()
@@ -203,10 +205,12 @@ def _on_depsgraph(_scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph) -> No
 
 @persistent
 def _on_load(_dummy: object) -> None:
+    """Forget the previous file's session. The project this file names is only offered: opening it imports and runs
+    the model's Python, which must not happen just because a .blend was opened (Blender's auto-run protection would
+    not apply to it)."""
     STATE.session, STATE.path, STATE.written = None, None, scene.Written()
     path = bpy.context.scene.get(PROJECT_KEY)
-    if path and Path(str(path)).exists():
-        open_project(Path(str(path)))
+    STATE.stored = Path(str(path)) if path and Path(str(path)).is_absolute() else None
 
 
 # ------------------------------------------------------------------------------------------------- projects
@@ -377,7 +381,15 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         row.operator("proctune.new", text="New", icon="ADD")
         row.operator("proctune.save", text="Save", icon="FILE_TICK")
         if s is None:
-            lay.label(text="No project open")
+            if STATE.stored is not None:
+                lay.label(text="This file used a project (runs its model's code):")
+                row = lay.row()
+                row.operator_context = "EXEC_DEFAULT"
+                op = row.operator("proctune.open", text=f"Open {STATE.stored.name}", icon="ERROR")
+                if op is not None:
+                    op.filepath = str(STATE.stored)
+            else:
+                lay.label(text="No project open")
             return
         lay.label(text=f"{s.model.name}: {STATE.path.name if STATE.path else 'unsaved'}")
         row = lay.row(align=True)
