@@ -1,6 +1,6 @@
 """The add-on in headless Blender (the bpy module): sliders, hand edits and handles through the scene."""
 # pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportUnknownVariableType=false
-# pyright: reportUnknownArgumentType=false, reportMissingTypeStubs=false
+# pyright: reportUnknownArgumentType=false, reportMissingTypeStubs=false, reportOptionalMemberAccess=false
 
 from __future__ import annotations
 
@@ -135,3 +135,73 @@ def test_loading_a_blend_does_not_run_its_project(project: None, tmp_path: Path)
     assert addon.STATE.stored == tmp_path / "limb.json"
     bpy.ops.proctune.open_stored("EXEC_DEFAULT")  # what the confirmation dialog's button does
     assert addon.STATE.session is not None
+
+
+def test_a_curve_edited_in_its_widget_reaches_the_model(project: None) -> None:
+    from proctune.blender import curves  # noqa: PLC0415
+
+    s = addon.STATE.session
+    assert s is not None
+    before = scene.read_verts(bpy.data.objects["lower fat"])
+    pts = curves.node("fat__lower__curve").mapping.curves[0].points
+    pts[1].location = (0.3, 0.8)  # the lower deposit now fills in early
+    addon._poll_curves()  # pyright: ignore[reportPrivateUsage]  # what the timer does every 0.2 s
+    assert s.base.fat.lower.curve.points[1] == pytest.approx((0.3, 0.8))
+    addon.rebuild()
+    assert np.abs(scene.read_verts(bpy.data.objects["lower fat"]) - before).max() > 1e-3
+
+
+def test_the_widget_draws_close_to_the_evaluated_curve(project: None) -> None:
+    """The widget's auto-clamped handles and PCHIP are different splines through the same points."""
+    from proctune.blender import curves  # noqa: PLC0415
+
+    s = addon.STATE.session
+    assert s is not None
+    c = s.base.growth.curve
+    m = curves.node("growth__curve").mapping
+    m.initialize()
+    xs = np.linspace(0.0, 1.0, 41)
+    drawn = np.array([m.evaluate(m.curves[0], float(x)) for x in xs])
+    assert np.abs(drawn - c.evaluate(xs)).max() < 0.03
+
+
+def test_keyframed_sliders_follow_the_timeline(project: None) -> None:
+    sc = bpy.context.scene
+    sc.proctune_params.growth__stage = 0.0
+    sc.keyframe_insert("proctune_params.growth__stage", frame=1)
+    sc.proctune_params.growth__stage = 1.0
+    sc.keyframe_insert("proctune_params.growth__stage", frame=21)
+    sc.frame_set(1)
+    small = _verts("upper bone")[:, 1].max()
+    sc.frame_set(21)
+    big = _verts("upper bone")[:, 1].max()
+    assert small == pytest.approx(0.30 * 0.3, abs=2e-3)
+    assert big == pytest.approx(0.30, abs=2e-3)
+
+
+def test_saving_bakes_keyframes_into_tracks(project: None, tmp_path: Path) -> None:
+    from proctune.core import Session  # noqa: PLC0415
+
+    sc = bpy.context.scene
+    sc.frame_start, sc.frame_end = 1, 21
+    sc.proctune_params.growth__stage = 0.0
+    sc.keyframe_insert("proctune_params.growth__stage", frame=1)
+    sc.proctune_params.growth__stage = 1.0
+    sc.keyframe_insert("proctune_params.growth__stage", frame=21)
+    sc.frame_set(11)
+    in_blender = _verts("upper bone")
+    addon.save_project(tmp_path / "anim.json")
+    headless = Session.load(tmp_path / "anim.json").at_frame(11).evaluate().elements["upper bone"].verts
+    np.testing.assert_allclose(headless, in_blender, atol=1e-5)
+
+
+def test_scaling_a_bone_object_changes_its_length(project: None) -> None:
+    obj = bpy.data.objects["upper bone"]
+    obj.scale = (1.0, 1.2, 1.0)
+    addon.rebuild()
+    s = addon.STATE.session
+    assert s is not None
+    assert s.base.upper.length == pytest.approx(0.36)
+    assert bpy.context.scene.proctune_params.upper__length == pytest.approx(0.36)
+    assert "upper bone" not in s.edits
+    assert np.allclose(np.array(obj.matrix_basis), np.eye(4))

@@ -17,7 +17,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import bpy
 import numpy as np
@@ -25,7 +25,7 @@ from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from proctune.blender import scene
+from proctune.blender import curves, scene, timeline
 from proctune.core import Session, Spec, specs
 from proctune.core.params import Path as ParamPath
 from proctune.core.session import describe
@@ -73,15 +73,18 @@ def _prop(spec: Spec, update: Any) -> Any:
         case "int":
             lo, hi = (int(r.lo), int(r.hi)) if r else (-(2**31), 2**31 - 1)
             return IntProperty(
-                name=spec.label, default=int(spec.default), min=lo, max=hi, description=desc, update=update
+                name=spec.label, default=int(cast(int, spec.default)), min=lo, max=hi, description=desc, update=update
             )
         case "float":
             lo, hi = (r.lo, r.hi) if r else (-1e9, 1e9)
             step = (r.step * 100.0) if r and r.step else 1.0  # Blender's step is in hundredths
+            default = float(cast(float, spec.default))
             return FloatProperty(
-                name=spec.label, default=float(spec.default), min=lo, max=hi, soft_min=lo, soft_max=hi, step=step,
-                precision=4, description=desc, update=update,
+                name=spec.label, default=default, min=lo, max=hi, soft_min=lo, soft_max=hi, step=step, precision=4,
+                description=desc, update=update,
             )  # fmt: skip
+        case "curve":
+            raise ValueError(f"{spec.key}: curves are edited in a curve widget, not a property")
 
 
 def _on_param(key: str) -> Any:
@@ -104,6 +107,8 @@ def _build_group(session: Session[Any]) -> type[bpy.types.PropertyGroup]:
     STATE.keys.clear()
     annotations: dict[str, Any] = {}
     for spec in specs(session.base):
+        if spec.kind == "curve":
+            continue
         annotations[spec.key] = _prop(spec, _on_param(spec.key))
         STATE.keys[spec.key] = spec.path
     for c in session.model.composites:
@@ -205,6 +210,34 @@ def _on_depsgraph(_scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph) -> No
 
 
 @persistent
+def _on_frame(_scene: bpy.types.Scene, _depsgraph: bpy.types.Depsgraph) -> None:
+    """Keyframed sliders changed with the frame: copy them into the session and rebuild now (playback and rendering
+    need this frame's geometry, not a deferred one)."""
+    s = STATE.session
+    if s is None:
+        return
+    values = timeline.current_values(STATE.keys)
+    if values:
+        s.apply(values)
+        rebuild()
+
+
+CURVE_POLL_S = 0.2
+
+
+def _poll_curves() -> float:
+    """Curve widgets fire no update: compare their points with the session's curves."""
+    s = STATE.session
+    if s is not None:
+        changes = curves.changed(s)
+        for path, c in changes.items():
+            s.set(path, c)
+        if changes:
+            schedule()
+    return CURVE_POLL_S
+
+
+@persistent
 def _on_load(_dummy: object) -> None:
     """Forget the previous file's session. The project this file names is only offered: opening it imports and runs
     the model's Python, which must not happen just because a .blend was opened (Blender's auto-run protection would
@@ -224,6 +257,7 @@ def _start(session: Session[Any], path: Path | None) -> None:
     _install_group(session)
     if path is not None:
         bpy.context.scene[PROJECT_KEY] = str(path)
+    curves.write(session)
     rebuild()
 
 
@@ -251,6 +285,7 @@ def save_project(path: Path) -> None:
         s.import_paths = tuple(
             str(Path(p).resolve().relative_to(path.parent.resolve(), walk_up=True)) for p in _absolute_imports(s)
         )
+    s.tracks = timeline.bake(STATE.keys)
     s.save(path)
     STATE.path = path
     bpy.context.scene[PROJECT_KEY] = str(path)
@@ -391,6 +426,7 @@ class PROCTUNE_OT_defaults(bpy.types.Operator):
             return {"CANCELLED"}
         s.base = s.model.defaults()
         s.composites = {c.name: c.default for c in s.model.composites}
+        curves.write(s)
         rebuild()
         return {"FINISHED"}
 
@@ -442,6 +478,7 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
             box.label(text=" / ".join(prefix) if prefix else "Parameters", icon="PROPERTIES")
             for spec in items:
                 box.prop(props, spec.key, slider=spec.kind == "float")
+        curves.draw(lay, s)
         self._layers(lay)
         self._edits(lay, s)
         self._handles(lay, s)
@@ -499,12 +536,21 @@ def register() -> None:
         bpy.utils.register_class(cls)
     bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     bpy.app.handlers.load_post.append(_on_load)
+    bpy.app.handlers.frame_change_post.append(_on_frame)
+    bpy.app.timers.register(_poll_curves, first_interval=CURVE_POLL_S, persistent=True)
 
 
 def unregister() -> None:
-    for h, fn in ((bpy.app.handlers.depsgraph_update_post, _on_depsgraph), (bpy.app.handlers.load_post, _on_load)):
+    handlers = bpy.app.handlers
+    for h, fn in (
+        (handlers.depsgraph_update_post, _on_depsgraph),
+        (handlers.load_post, _on_load),
+        (handlers.frame_change_post, _on_frame),
+    ):
         if fn in h:
             h.remove(fn)
+    if bpy.app.timers.is_registered(_poll_curves):
+        bpy.app.timers.unregister(_poll_curves)
     if STATE.group is not None:
         del bpy.types.Scene.proctune_params
         bpy.utils.unregister_class(STATE.group)
