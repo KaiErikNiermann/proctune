@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  BLENDER_VERSION: "5.2.3"
+  # libraries the bpy wheel and the Blender binary load, even without a display
+  BLENDER_LIBS: >-
+    libxrender1 libxxf86vm1 libxfixes3 libxi6 libxkbcommon0 libxkbcommon-x11-0 libsm6 libice6
+    libgl1 libegl1 libgl1-mesa-dri libglu1-mesa libdbus-1-3 libwayland-client0 libwayland-cursor0
+    libwayland-egl1 libdecor-0-0
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pipx install poetry
+      - run: poetry install --with dev,blender
+      - run: poetry run ruff check .
+      - run: poetry run ruff format --check .
+      - run: poetry run pyright
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $BLENDER_LIBS
+      - run: pipx install poetry
+      - run: poetry install --with dev,blender
+      # the core, the add-on under the bpy wheel, errors, leaks and the Optuna fit; the end-to-end suite is its own job
+      - run: poetry run pytest -q --ignore=tests/test_e2e.py
+
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xauth imagemagick $BLENDER_LIBS
+      - name: Blender
+        id: blender
+        uses: actions/cache@v4
+        with:
+          path: blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+      - if: steps.blender.outputs.cache-hit != 'true'
+        run: |
+          series="${BLENDER_VERSION%.*}"
+          curl -sfL "https://download.blender.org/release/Blender${series}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar -xJ
+          mv "blender-${BLENDER_VERSION}-linux-x64" blender
+      - run: pipx install poetry
+      - run: poetry install --with dev,blender
+      - name: End to end in the Blender GUI on Xvfb
+        env:
+          PROCTUNE_BLENDER: ${{ github.workspace }}/blender/blender
+          PROCTUNE_MAGICK: import  # ImageMagick 6 on Ubuntu
+          PROCTUNE_E2E_KEEP: ${{ github.workspace }}/e2e-out
+          PROCTUNE_E2E_REQUIRED: "1"
+        run: poetry run pytest -q tests/test_e2e.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: e2e-out
+          if-no-files-found: ignore
