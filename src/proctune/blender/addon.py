@@ -14,7 +14,10 @@ sculpted muscle stroke by stroke.
 from __future__ import annotations
 
 import logging
+import textwrap
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -25,10 +28,12 @@ from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
+from proctune import config, deps
 from proctune.blender import curves, scene, timeline
-from proctune.core import Session, Spec, specs
+from proctune.core import Session, Spec, files, specs
 from proctune.core.params import Path as ParamPath
 from proctune.core.session import describe
+from proctune.errors import MissingDependenciesError, ProctuneError
 
 if TYPE_CHECKING:
     from bpy.stub_internal.rna_enums import OperatorReturnItems
@@ -54,6 +59,8 @@ class State:
     dragged: frozenset[str] = frozenset()
     last_ms: float = 0.0
     message: str = ""
+    error: ProctuneError | None = None
+    """The last failure, shown in the panel with its remedy until the next successful rebuild"""
     stored: Path | None = None
     """The project a loaded .blend names, offered in the panel; never opened by itself"""
 
@@ -92,13 +99,14 @@ def _on_param(key: str) -> Any:
         s = STATE.session
         if STATE.syncing or s is None:
             return
-        value = getattr(self, key)
-        path = STATE.keys[key]
-        if path[0] == "@composite":
-            s.set_composite(path[1], float(value))
-        else:
-            s.set(path, value)
-        schedule()
+        with guarded("setting a parameter"):
+            value = getattr(self, key)
+            path = STATE.keys[key]
+            if path[0] == "@composite":
+                s.set_composite(path[1], float(value))
+            else:
+                s.set(path, value)
+            schedule()
 
     return update
 
@@ -144,6 +152,42 @@ def sync_properties() -> None:
         STATE.syncing = False
 
 
+# ------------------------------------------------------------------------------------------------- errors
+
+
+@contextmanager
+def guarded(what: str) -> Generator[None]:
+    """Run an entry point Blender calls (a timer, a handler, an update callback) so that no failure is silent:
+    Blender only prints those exceptions. The error goes to the panel (with its remedy) and the log."""
+    try:
+        yield
+    except ProctuneError as e:
+        STATE.error = e
+        log.warning("%s: %s", what, e)
+    except Exception as e:
+        log.exception("%s failed", what)
+        STATE.error = ProctuneError(
+            f"{what} failed: {type(e).__name__}: {e}",
+            "a proctune bug: the traceback is in the console (Window > Toggle System Console on Windows); "
+            "please report it",
+        )
+    _redraw()
+
+
+def _redraw() -> None:
+    wm = bpy.context.window_manager
+    for w in wm.windows if wm else ():
+        for a in w.screen.areas:
+            if a.type == "VIEW_3D":
+                a.tag_redraw()
+
+
+def report(op: bpy.types.Operator, e: ProctuneError) -> Ret:
+    STATE.error = e
+    op.report({"ERROR"}, str(e))
+    return {"CANCELLED"}
+
+
 # ------------------------------------------------------------------------------------------------- rebuilding
 
 
@@ -162,7 +206,8 @@ def _tick() -> float | None:
     if _modal_running() and not STATE.dragged:
         return 0.1  # a grab or a stroke is running: capture when it ends
     STATE.pending = False
-    rebuild()
+    with guarded("rebuild"):
+        rebuild()
     return None
 
 
@@ -187,12 +232,18 @@ def rebuild() -> None:
     STATE.last_ms = (time.perf_counter() - t) * 1000.0
     stale = result.stale
     STATE.message = f"stale sculpt (topology changed): {', '.join(stale)}" if stale else ""
+    STATE.error = None
 
 
 @persistent
 def _on_depsgraph(_scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph) -> None:
     if STATE.session is None or STATE.pending:
         return
+    with guarded("noticing a hand edit"):
+        _notice(depsgraph)
+
+
+def _notice(depsgraph: bpy.types.Depsgraph) -> None:
     for u in depsgraph.updates:
         obj = getattr(u.id, "original", None)
         if not isinstance(obj, bpy.types.Object):
@@ -216,10 +267,11 @@ def _on_frame(_scene: bpy.types.Scene, _depsgraph: bpy.types.Depsgraph) -> None:
     s = STATE.session
     if s is None:
         return
-    values = timeline.current_values(STATE.keys)
-    if values:
-        s.apply(values)
-        rebuild()
+    with guarded("following the timeline"):
+        values = timeline.current_values(STATE.keys)
+        if values:
+            s.apply(values)
+            rebuild()
 
 
 CURVE_POLL_S = 0.2
@@ -229,11 +281,12 @@ def _poll_curves() -> float:
     """Curve widgets fire no update: compare their points with the session's curves."""
     s = STATE.session
     if s is not None:
-        changes = curves.changed(s)
-        for path, c in changes.items():
-            s.set(path, c)
-        if changes:
-            schedule()
+        with guarded("reading the curve widgets"):
+            changes = curves.changed(s)
+            for path, c in changes.items():
+                s.set(path, c)
+            if changes:
+                schedule()
     return CURVE_POLL_S
 
 
@@ -253,7 +306,7 @@ def _on_load(_dummy: object) -> None:
 def _start(session: Session[Any], path: Path | None) -> None:
     STATE.session, STATE.path, STATE.written = session, path, scene.Written()
     for obj in [*scene.element_objects().values(), *scene.handle_objects().values()]:
-        bpy.data.objects.remove(obj)
+        scene.remove(obj)
     _install_group(session)
     if path is not None:
         bpy.context.scene[PROJECT_KEY] = str(path)
@@ -278,13 +331,12 @@ def new_project(source: str, import_dir: Path) -> Session[Any]:
 def save_project(path: Path) -> None:
     s = STATE.session
     if s is None:
-        raise RuntimeError("no project open")
+        raise ProctuneError("no project open", "open or start a project first")
     rebuild()  # capture anything not yet captured
     if STATE.path is None or path.parent != STATE.path.parent:
         # import paths are relative to the project file
-        s.import_paths = tuple(
-            str(Path(p).resolve().relative_to(path.parent.resolve(), walk_up=True)) for p in _absolute_imports(s)
-        )
+        # relative where possible (the project moves with its model), absolute across Windows drives
+        s.import_paths = tuple(files.relative_or_absolute(p, path.parent.resolve()) for p in _absolute_imports(s))
     s.tracks = timeline.bake(STATE.keys)
     s.save(path)
     STATE.path = path
@@ -308,7 +360,10 @@ class PROCTUNE_OT_open(bpy.types.Operator, ImportHelper):  # pyright: ignore[rep
     filter_glob: StringProperty(default="*.json", options={"HIDDEN"})  # pyright: ignore[reportInvalidTypeForm]
 
     def execute(self, context: bpy.types.Context) -> Ret:
-        open_project(Path(self.filepath))
+        try:
+            open_project(Path(self.filepath))
+        except ProctuneError as e:
+            return report(self, e)
         return {"FINISHED"}
 
 
@@ -341,7 +396,10 @@ class PROCTUNE_OT_open_stored(bpy.types.Operator):
     def execute(self, context: bpy.types.Context) -> Ret:
         if STATE.stored is None:
             return {"CANCELLED"}
-        open_project(STATE.stored)
+        try:
+            open_project(STATE.stored)
+        except ProctuneError as e:
+            return report(self, e)
         return {"FINISHED"}
 
 
@@ -357,7 +415,10 @@ class PROCTUNE_OT_new(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context: bpy.types.Context) -> Ret:
-        new_project(self.source, Path(bpy.path.abspath(self.directory)))
+        try:
+            new_project(self.source, Path(bpy.path.abspath(self.directory)))
+        except ProctuneError as e:
+            return report(self, e)
         return {"FINISHED"}
 
 
@@ -376,8 +437,30 @@ class PROCTUNE_OT_save(bpy.types.Operator, ExportHelper):  # pyright: ignore[rep
         return {"RUNNING_MODAL"}
 
     def execute(self, context: bpy.types.Context) -> Ret:
-        save_project(Path(self.filepath))
+        try:
+            save_project(Path(self.filepath))
+        except ProctuneError as e:
+            return report(self, e)
         self.report({"INFO"}, f"saved {self.filepath}")
+        return {"FINISHED"}
+
+
+class PROCTUNE_OT_install(bpy.types.Operator):
+    """Install missing Python packages into Blender's Python (pip, into Blender's user scripts/modules or the
+    configured folder); needs a network connection"""
+
+    bl_idname = "proctune.install"
+    bl_label = "Install missing packages"
+    packages: StringProperty(description="Comma-separated pip packages")  # pyright: ignore[reportInvalidTypeForm]
+
+    def execute(self, context: bpy.types.Context) -> Ret:
+        names = [p.strip() for p in self.packages.split(",") if p.strip()]
+        try:
+            r = deps.install_into_blender(names)
+        except ProctuneError as e:
+            return report(self, e)
+        STATE.error = None
+        self.report({"INFO"}, f"installed {', '.join(r.installed) or 'nothing'} into {r.target}")
         return {"FINISHED"}
 
 
@@ -388,7 +471,10 @@ class PROCTUNE_OT_rebuild(bpy.types.Operator):
     bl_label = "Rebuild"
 
     def execute(self, context: bpy.types.Context) -> Ret:
-        rebuild()
+        try:
+            rebuild()
+        except ProctuneError as e:
+            return report(self, e)
         return {"FINISHED"}
 
 
@@ -450,6 +536,7 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         row.operator("proctune.open", text="Open", icon="FILEBROWSER")
         row.operator("proctune.new", text="New", icon="ADD")
         row.operator("proctune.save", text="Save", icon="FILE_TICK")
+        self._error(lay)
         if s is None:
             if STATE.stored is not None:
                 lay.label(text=f"This file used {STATE.stored}")
@@ -482,6 +569,22 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         self._layers(lay)
         self._edits(lay, s)
         self._handles(lay, s)
+
+    @staticmethod
+    def _error(lay: bpy.types.UILayout) -> None:
+        e = STATE.error
+        if e is None:
+            return
+        box = lay.box()
+        box.alert = True
+        for i, line in enumerate(textwrap.wrap(e.message, 48)):
+            box.label(text=line, icon="ERROR" if i == 0 else "BLANK1")
+        for line in textwrap.wrap(e.remedy, 48):
+            box.label(text=line, icon="BLANK1")
+        if isinstance(e, MissingDependenciesError):
+            op = box.operator("proctune.install", icon="IMPORT")
+            if op is not None:
+                op.packages = ",".join(e.packages)
 
     @staticmethod
     def _layers(lay: bpy.types.UILayout) -> None:
@@ -520,6 +623,7 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
 
 
 CLASSES: tuple[type, ...] = (
+    PROCTUNE_OT_install,
     PROCTUNE_OT_open,
     PROCTUNE_OT_open_stored,
     PROCTUNE_OT_new,
@@ -534,6 +638,10 @@ CLASSES: tuple[type, ...] = (
 def register() -> None:
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    with guarded("checking proctune's packages"):
+        cfg = config.load()
+        deps.ensure_on_path(cfg.packages or deps.blender_modules())
+        deps.require(deps.CORE, "proctune")
     bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     bpy.app.handlers.load_post.append(_on_load)
     bpy.app.handlers.frame_change_post.append(_on_frame)

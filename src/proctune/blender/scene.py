@@ -118,8 +118,16 @@ def write(result: Result, written: Written, skip: frozenset[str] = frozenset()) 
         written.verts[name] = verts.astype(np.float32).astype(np.float64)  # as stored in the mesh
     for name, obj in objs.items():
         if name not in result.elements:
-            bpy.data.objects.remove(obj)
+            remove(obj)
             written.verts.pop(name, None)
+
+
+def remove(obj: bpy.types.Object) -> None:
+    """Remove an object and its mesh (removing only the object would leave the mesh behind, unused, in the file)."""
+    data = obj.data
+    bpy.data.objects.remove(obj)
+    if isinstance(data, bpy.types.Mesh) and data.users == 0:
+        bpy.data.meshes.remove(data)
 
 
 def write_handles(session: Session[object], written: Written, skip: frozenset[str] = frozenset()) -> None:
