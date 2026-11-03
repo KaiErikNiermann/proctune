@@ -1,0 +1,11 @@
+schema_version = "1.0.0"
+
+id = "proctune"
+version = "0.1.0"
+name = "proctune"
+tagline = "Live sliders, handles and regeneration-proof sculpting for procedural models"
+maintainer = "Kai Erik Niermann"
+type = "add-on"
+blender_version_min = "5.0.0"
+# Blender requires add-ons that use its Python API to be GPL-3.0-or-later; proctune.core does not use it
+license = ["SPDX:GPL-3.0-or-later"]
