@@ -1,0 +1,306 @@
+"""Failures attributable to proctune: every one raises a proctune error that names the file or model and says what to
+do, and none leaves a half-written file behind."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+
+import limb
+import numpy as np
+import pytest
+
+from proctune import config, deps
+from proctune.core import Session
+from proctune.core import files as F
+from proctune.core.session import load_model
+from proctune.errors import MissingDependenciesError, ModelError, ProctuneError, ProjectError
+
+EXAMPLE = Path(limb.__file__).parent
+ROOT_USER = hasattr(os, "geteuid") and os.geteuid() == 0
+needs_permissions = pytest.mark.skipif(ROOT_USER, reason="root ignores file permissions")
+
+
+def _session() -> Session[limb.Limb]:
+    return Session.new(limb.MODEL, "limb:MODEL", (str(EXAMPLE),))
+
+
+def _project(tmp_path: Path, **override: object) -> Path:
+    doc: dict[str, object] = {"format": 1, "model": "limb:MODEL", "import_paths": [str(EXAMPLE)], "params": {}}
+    doc.update(override)
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def _remedy(e: pytest.ExceptionInfo[ProctuneError]) -> str:
+    assert e.value.remedy, f"no remedy for: {e.value.message}"
+    return e.value.remedy
+
+
+@pytest.fixture
+def readonly(tmp_path: Path) -> Iterator[Path]:
+    d = tmp_path / "ro"
+    d.mkdir()
+    d.chmod(0o555)
+    yield d
+    d.chmod(0o755)
+
+
+# ------------------------------------------------------------------------------------------------- writing
+
+
+@needs_permissions
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows ignores the read-only flag on folders")
+def test_save_into_a_read_only_folder(readonly: Path) -> None:
+    with pytest.raises(ProjectError, match="permission denied") as e:
+        _session().save(readonly / "p.json")
+    assert "writable" in _remedy(e)
+    assert list(readonly.iterdir()) == []  # no temporary file left
+
+
+@needs_permissions
+def test_save_over_a_read_only_file_keeps_it(tmp_path: Path) -> None:
+    path = tmp_path / "p.json"
+    path.write_text("old")
+    path.chmod(0o444)
+    try:
+        with pytest.raises(ProjectError, match="permission denied"):
+            _session().save(path)
+        assert path.read_text() == "old"
+        assert [p.name for p in tmp_path.iterdir()] == ["p.json"]
+    finally:
+        path.chmod(0o644)
+
+
+def test_save_into_a_missing_folder(tmp_path: Path) -> None:
+    with pytest.raises(ProjectError, match="does not exist"):
+        _session().save(tmp_path / "nope" / "p.json")
+
+
+def test_save_handles_spaces_and_unicode(tmp_path: Path) -> None:
+    d = tmp_path / "Projekt äöü 手"
+    d.mkdir()
+    s = _session()
+    s.save(d / "mein projekt.json")
+    assert Session.load(d / "mein projekt.json").base.upper.length == s.base.upper.length
+
+
+def test_a_failed_sculpt_write_keeps_the_old_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _session()
+    r = s.evaluate().elements["muscle"]
+    s.capture_sculpt("muscle", r.verts + 0.001)
+    path = tmp_path / "p.json"
+    s.save(path)
+    before = (path.read_bytes(), path.with_suffix(".npz").read_bytes())
+    real = F.write_atomic
+
+    def fail_on_npz(p: Path, data: bytes) -> None:
+        if p.suffix == ".npz":
+            raise OSError(28, "No space left on device")
+        real(p, data)
+
+    monkeypatch.setattr(F, "write_atomic", fail_on_npz)
+    s.set(("upper", "length"), 0.4)
+    with pytest.raises(ProjectError, match="disk is full"):
+        s.save(path)
+    assert path.with_suffix(".npz").read_bytes() == before[1]
+
+
+# ------------------------------------------------------------------------------------------------- reading
+
+
+def test_load_a_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(ProjectError, match="does not exist"):
+        Session.load(tmp_path / "nope.json")
+
+
+def test_load_broken_json_says_where(tmp_path: Path) -> None:
+    (tmp_path / "p.json").write_text('{"format": 1,\n "model": }')
+    with pytest.raises(ProjectError, match="line 2, column"):
+        Session.load(tmp_path / "p.json")
+
+
+def test_load_not_a_project(tmp_path: Path) -> None:
+    (tmp_path / "p.json").write_text("[1, 2]")
+    with pytest.raises(ProjectError, match="not a proctune project"):
+        Session.load(tmp_path / "p.json")
+
+
+def test_load_another_format(tmp_path: Path) -> None:
+    with pytest.raises(ProjectError, match="format 99"):
+        Session.load(_project(tmp_path, format=99))
+
+
+def test_out_of_range_values_are_listed(tmp_path: Path) -> None:
+    params = {"upper": {"length": 5.0}, "joint_deg": -40.0}
+    with pytest.raises(ProjectError, match=r"upper\.length = 5\.0 \(allowed 0\.1 to 0\.6\).*joint_deg") as e:
+        Session.load(_project(tmp_path, params=params))
+    assert "default" in _remedy(e)
+
+
+def test_unknown_parameters_are_named(tmp_path: Path) -> None:
+    with pytest.raises(ProjectError, match="unknown parameters"):
+        Session.load(_project(tmp_path, params={"upper": {"lenght": 0.3}}))
+
+
+def test_invalid_curve_points(tmp_path: Path) -> None:
+    params = {"growth": {"curve": {"points": [[0.5, 0.0], [0.5, 1.0]]}}}
+    with pytest.raises(ProjectError, match="increasing x"):
+        Session.load(_project(tmp_path, params=params))
+
+
+def test_corrupt_sculpt_file(tmp_path: Path) -> None:
+    path = _project(tmp_path)
+    path.with_suffix(".npz").write_bytes(b"not a zip")
+    with pytest.raises(ProjectError, match="sculpts cannot be read") as e:
+        Session.load(path)
+    assert "move it away" in _remedy(e)
+
+
+# ------------------------------------------------------------------------------------------------- models
+
+
+def _module(tmp_path: Path, name: str, code: str) -> str:
+    (tmp_path / f"{name}.py").write_text(code)
+    return str(tmp_path)
+
+
+def test_model_name_must_be_module_and_attribute() -> None:
+    with pytest.raises(ProjectError, match="not module:attribute"):
+        load_model("limb")
+
+
+def test_missing_model_module_lists_where_it_looked(tmp_path: Path) -> None:
+    with pytest.raises(ProjectError, match=f"not found \\(looked in {tmp_path}") as e:
+        load_model("no_such_model_xyz:MODEL", (str(tmp_path),))
+    assert "import_paths" in _remedy(e)
+
+
+def test_a_package_the_model_needs_is_named(tmp_path: Path) -> None:
+    d = _module(tmp_path, "needs_pkg_model", "import yaml_not_installed_xyz\nMODEL = None\n")
+    with pytest.raises(MissingDependenciesError, match="yaml_not_installed_xyz") as e:
+        load_model("needs_pkg_model:MODEL", (d,))
+    assert e.value.packages == ("yaml_not_installed_xyz",)
+    assert "install_into_blender" in _remedy(e)
+
+
+def test_a_model_that_crashes_on_import(tmp_path: Path) -> None:
+    d = _module(tmp_path, "crashing_model", "raise RuntimeError('boom')\n")
+    with pytest.raises(ModelError, match="RuntimeError: boom"):
+        load_model("crashing_model:MODEL", (d,))
+
+
+def test_a_module_without_the_model(tmp_path: Path) -> None:
+    d = _module(tmp_path, "empty_model", "X = 1\n")
+    with pytest.raises(ProjectError, match="has no 'MODEL'"):
+        load_model("empty_model:MODEL", (d,))
+
+
+def test_a_stage_that_crashes_names_the_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _session()
+
+    def broken(*_: object) -> tuple[()]:
+        raise ZeroDivisionError("division by zero")
+
+    monkeypatch.setattr(limb, "fat", broken)
+    with pytest.raises(ModelError, match="stage 'fat' failed: ZeroDivisionError") as e:
+        s.evaluate()
+    assert "last good mesh" in _remedy(e)
+
+
+# ------------------------------------------------------------------------------------------------- packages and config
+
+
+def test_missing_packages_are_named_with_their_pip_names() -> None:
+    reqs = (
+        deps.requirement("yaml_xyz_missing"),
+        deps.requirement("yaml"),
+        deps.Requirement("np_missing_xyz", "numpy-x", "arrays"),
+    )
+    with pytest.raises(MissingDependenciesError) as e:
+        deps.require(reqs, "a model")
+    assert "numpy-x (arrays)" in e.value.message
+    assert "yaml_xyz_missing" in e.value.packages
+    assert deps.requirement("yaml.loader").package == "PyYAML"
+
+
+def test_installing_drops_what_the_interpreter_has(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    report = {
+        "install": [
+            {"metadata": {"name": "numpy", "version": "2.0"}},
+            {"metadata": {"name": "tiny-x", "version": "1.0"}},
+        ]
+    }
+
+    def pip(args: list[str], _python: str) -> str:
+        calls.append(args)
+        return json.dumps(report) if "--dry-run" in args else ""
+
+    monkeypatch.setattr(deps, "_pip", pip)
+    r = deps.install(["tiny-x"], tmp_path / "site")
+    assert r.installed == ("tiny-x==1.0",)
+    assert r.kept == ("numpy",)
+    assert "--no-deps" in calls[-1]
+    sys.path.remove(str(tmp_path / "site"))
+
+
+def test_a_missing_interpreter_is_explained(tmp_path: Path) -> None:
+    with pytest.raises(MissingDependenciesError, match="cannot run Python at") as e:
+        deps.install(["anything"], tmp_path, python=sys.executable + "-nope")
+    assert "sys.executable" in _remedy(e)
+
+
+def test_pip_failure_is_explained(tmp_path: Path) -> None:
+    with pytest.raises(MissingDependenciesError, match="pip failed") as e:
+        deps.install(["definitely-not-a-package-proctune-xyz"], tmp_path, python=sys.executable)
+    assert "ensurepip" in _remedy(e)
+
+
+def test_config_file_and_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('blender = "/opt/blender/blender"\npackages = "~/pkgs"\n')
+    monkeypatch.setenv("PROCTUNE_CONFIG", str(cfg))
+    monkeypatch.setenv("PROCTUNE_MAGICK", "/usr/local/bin/magick")
+    c = config.load()
+    assert c.blender == "/opt/blender/blender"
+    assert c.packages == Path.home() / "pkgs"
+    assert c.magick == "/usr/local/bin/magick"
+
+
+def test_config_errors_name_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "config.toml"
+    monkeypatch.setenv("PROCTUNE_CONFIG", str(cfg))
+    cfg.write_text("blendr = 'x'\n")
+    with pytest.raises(ProctuneError, match="unknown keys"):
+        config.load()
+    cfg.write_text("blender = \n")
+    with pytest.raises(ProctuneError, match="cannot read the proctune config"):
+        config.load()
+
+
+def test_config_lives_in_appdata_on_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PROCTUNE_CONFIG", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    assert config.config_path() == tmp_path / "Roaming" / "proctune" / "config.toml"
+
+
+def test_paths_across_drives_fall_back_to_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert F.relative_or_absolute(tmp_path / "a" / "b", tmp_path / "c") == os.path.join("..", "a", "b")
+
+    def no_relpath(*_: object) -> str:
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(os.path, "relpath", no_relpath)
+    assert F.relative_or_absolute(tmp_path / "a", tmp_path) == str((tmp_path / "a").resolve())
+
+
+def test_numpy_is_never_installed_twice() -> None:
+    """Blender's own numpy must stay the one imported: it is in CORE but always present where proctune runs."""
+    assert deps.missing(deps.CORE[:1]) == ()
+    assert np.__version__

@@ -145,3 +145,16 @@ def clamp(obj: object, name: str, value: float) -> float:
     """`value` held to the range of field `name` of `obj`'s class (unchanged if it has none)."""
     r = range_of(type(obj), name)
     return value if r is None else min(max(value, r.lo), r.hi)
+
+
+def validate(obj: object) -> None:
+    """Raise `ValueError` naming every value outside its `Range` (a hand-edited project, say)."""
+    bad = [
+        f"{'.'.join(s.path)} = {s.default} (allowed {s.range.lo} to {s.range.hi})"
+        for s in specs(obj)
+        if s.range is not None
+        and s.kind in ("float", "int")
+        and not s.range.lo <= float(cast(float, s.default)) <= s.range.hi
+    ]
+    if bad:
+        raise ValueError("out of range: " + "; ".join(bad))

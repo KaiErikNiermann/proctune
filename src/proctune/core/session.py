@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import io
 import json
 import sys
+import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import reduce
@@ -19,9 +21,12 @@ from typing import Any, cast
 
 import numpy as np
 
+from proctune import deps
+from proctune.core import files
 from proctune.core import params as P
 from proctune.core.element import Edit, Element, Resolved, Tweak, capture_sculpt, capture_tweak, resolve
 from proctune.core.model import F64, Binds, Handle, Model
+from proctune.errors import MissingDependenciesError, ModelError, ProctuneError, ProjectError
 
 FORMAT = 1
 type Track = tuple[tuple[float, float], ...]
@@ -59,6 +64,7 @@ class Session[T]:
 
     @staticmethod
     def new[U](model: Model[U], source: str = "", import_paths: tuple[str, ...] = ()) -> Session[U]:
+        deps.require(deps.CORE, "proctune")
         return Session(
             model,
             model.defaults(),
@@ -112,10 +118,21 @@ class Session[T]:
         done: dict[str, Resolved] = {}
         stages: dict[str, tuple[str, ...]] = {}
         for stage in self.model.stages:
-            built: tuple[Element, ...] = stage.build(p, dict(done))
+            try:
+                built: tuple[Element, ...] = stage.build(p, dict(done))
+            except ProctuneError:
+                raise
+            except Exception as e:
+                raise ModelError(
+                    f"{self.model.name}: stage {stage.name!r} failed: {type(e).__name__}: {e}",
+                    "the model's code raised; the traceback is in the log (Blender: Window > Toggle System Console "
+                    "on Windows, the terminal on Linux). The last good mesh stays in the scene",
+                ) from e
             for e in built:
                 if e.name in done:
-                    raise ValueError(f"stage {stage.name}: element name {e.name!r} is taken")
+                    raise ModelError(
+                        f"stage {stage.name}: element name {e.name!r} is taken", "give every element a unique name"
+                    )
                 done[e.name] = resolve(e, self.edits.get(e.name))
             stages[stage.name] = tuple(e.name for e in built)
         self.last = Result(done, stages)
@@ -163,6 +180,8 @@ class Session[T]:
     # ------------------------------------------------------------------------------------------- files
 
     def save(self, path: FsPath) -> None:
+        """Write ``path`` (JSON) and, if anything is sculpted, ``path.npz``. Each file is written to a temporary file
+        beside it and moved into place, so a failed save never leaves a half-written project."""
         sculpts = {n: e.displacement for n, e in self.edits.items() if e.displacement is not None}
         doc = {
             "format": FORMAT,
@@ -177,22 +196,40 @@ class Session[T]:
                 if not e.tweak.identity
             },
         }
-        path.write_text(json.dumps(doc, indent=2) + "\n")
         npz = path.with_suffix(".npz")
-        if sculpts:
-            np.savez_compressed(npz, **cast(dict[str, Any], sculpts))
-        elif npz.exists():
-            npz.unlink()
+        try:
+            files.write_atomic(path, (json.dumps(doc, indent=2) + "\n").encode())
+            if sculpts:
+                buf = io.BytesIO()
+                np.savez_compressed(buf, **cast(dict[str, Any], sculpts))
+                files.write_atomic(npz, buf.getvalue())
+            elif npz.exists():
+                npz.unlink()
+        except OSError as e:
+            raise files.write_error(path, e) from e
 
     @staticmethod
     def load(path: FsPath) -> Session[Any]:
-        doc = json.loads(path.read_text())
+        doc = files.read_json(path)
         if doc.get("format") != FORMAT:
-            raise ValueError(f"{path}: format {doc.get('format')}, expected {FORMAT}")
+            raise ProjectError(
+                f"{path}: project format {doc.get('format')!r}, this proctune reads {FORMAT}",
+                "open it with the proctune version that wrote it",
+            )
+        source = doc.get("model")
+        if not isinstance(source, str):
+            raise ProjectError(f"{path}: no model named", 'the file needs "model": "module:attribute"')
         paths = tuple(cast(list[str], doc.get("import_paths", [])))
-        model = load_model(doc["model"], tuple(str((path.parent / p).resolve()) for p in paths))
-        s = Session.new(model, doc["model"], paths)
-        s.base = P.from_dict(cast(type[Any], type(s.base)), doc.get("params", {}))
+        model = load_model(source, tuple(str((path.parent / p).resolve()) for p in paths), path)
+        s = Session.new(model, source, paths)
+        try:
+            s.base = P.from_dict(cast(type[Any], type(s.base)), doc.get("params", {}))
+            P.validate(s.base)
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProjectError(
+                f"{path}: parameters do not fit model {source}: {e}",
+                "fix the value in the file, or remove it to use the model's default",
+            ) from e
         s.composites.update(cast(dict[str, float], doc.get("composites", {})))
         tracks = cast(dict[str, list[list[float]]], doc.get("tracks", {}))
         s.tracks = {n: tuple((float(f), float(v)) for f, v in t) for n, t in tracks.items()}
@@ -201,9 +238,15 @@ class Session[T]:
             s.edits[n] = Edit(Tweak(np.array(t["linear"], np.float64), np.array(t["offset"], np.float64)))
         npz = path.with_suffix(".npz")
         if npz.exists():
-            with np.load(npz) as z:
-                for n in z.files:
-                    s.edits[n] = Edit(s.edits.get(n, Edit()).tweak, np.asarray(z[n], np.float64))
+            try:
+                with np.load(npz) as z:
+                    for n in z.files:
+                        s.edits[n] = Edit(s.edits.get(n, Edit()).tweak, np.asarray(z[n], np.float64))
+            except (OSError, ValueError, zipfile.BadZipFile) as e:
+                raise ProjectError(
+                    f"{npz}: the sculpts cannot be read ({e})",
+                    f"restore {npz.name} from a backup, or move it away to open the project without its sculpts",
+                ) from e
         return s
 
 
@@ -217,18 +260,41 @@ class ProjectInfo:
 
 
 def describe(path: FsPath) -> ProjectInfo:
-    doc = json.loads(path.read_text())
+    doc = files.read_json(path)
     dirs = tuple((path.parent / p).resolve() for p in cast(list[str], doc.get("import_paths", [])))
     return ProjectInfo(path.resolve(), str(doc.get("model", "")), dirs)
 
 
-def load_model(source: str, import_paths: tuple[str, ...] = ()) -> Model[Any]:
-    """Import ``module:attribute`` (after putting `import_paths` first on ``sys.path``) and return that model."""
+def load_model(source: str, import_paths: tuple[str, ...] = (), project: FsPath | None = None) -> Model[Any]:
+    """Import ``module:attribute`` (after putting `import_paths` first on ``sys.path``) and return that model. A
+    module that is already imported is reloaded, so edits to the model's code take effect on reopening."""
+    where = f"{project}: " if project else ""
     module, _, attr = source.partition(":")
-    if not attr:
-        raise ValueError(f"{source!r}: expected module:attribute")
+    if not module or not attr:
+        raise ProjectError(f"{where}model {source!r} is not module:attribute", 'name it like "limb:MODEL"')
     for p in reversed(import_paths):
         if p not in sys.path:
             sys.path.insert(0, p)
-    mod = importlib.reload(sys.modules[module]) if module in sys.modules else importlib.import_module(module)
-    return cast(Model[Any], getattr(mod, attr))
+    try:
+        mod = importlib.reload(sys.modules[module]) if module in sys.modules else importlib.import_module(module)
+    except ModuleNotFoundError as e:
+        if e.name == module or (e.name and module.startswith(e.name + ".")):
+            dirs = ", ".join(import_paths) or "(none)"
+            raise ProjectError(
+                f"{where}model module {module!r} not found (looked in {dirs} and Python's path)",
+                "check the project's import_paths point at the folder holding the model's .py file",
+            ) from e
+        req = deps.requirement(e.name or "?", f"model {source}")
+        raise MissingDependenciesError(
+            f"{where}model {source} imports {req.package}, which this Python lacks",
+            deps.install_hint([req.package]),
+            (req.package,),
+        ) from e
+    except Exception as e:
+        raise ModelError(
+            f"{where}importing model module {module!r} failed: {type(e).__name__}: {e}", "fix the model's code"
+        ) from e
+    model = getattr(mod, attr, None)
+    if model is None:
+        raise ProjectError(f"{where}module {module!r} has no {attr!r}", f"the module must define {attr} (the model)")
+    return cast(Model[Any], model)

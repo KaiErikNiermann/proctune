@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.interpolate import PchipInterpolator
 
 type F64 = NDArray[np.float64]
 
@@ -43,6 +42,9 @@ class Curve:
         inside = np.clip(x, xs[0], xs[-1])
         if len(pts) == 2:
             return np.interp(inside, xs, ys)
+        # imported here so `import proctune` works without scipy and can say what is missing (proctune.deps)
+        from scipy.interpolate import PchipInterpolator  # noqa: PLC0415
+
         return np.asarray(PchipInterpolator(xs, ys, extrapolate=False)(inside), np.float64)
 
     @staticmethod
