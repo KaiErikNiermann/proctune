@@ -40,6 +40,7 @@ from scipy.spatial import KDTree
 
 from proctune.core import Composite, Curve, Element, Frame, Handle, Range, Resolved, Stage, allometric
 from proctune.core.params import clamp
+from proctune.shapes import revolution
 
 type F64 = NDArray[np.float64]
 
@@ -186,16 +187,6 @@ def _frame(origin: F64, along: F64, scale: F64) -> Frame:
     y = _unit(along)
     z = _unit(BEND_AXIS - y * float(BEND_AXIS @ y))
     return Frame(origin, np.column_stack([np.cross(y, z), y, z]), scale)
-
-
-def revolution(profile: F64, sections: int = SECTIONS) -> tuple[F64, NDArray[np.int32]]:
-    """A closed solid of revolution about the y axis from radii `profile` at evenly spaced t in [0, 1] (zero at both
-    ends: poles). trimesh revolves about z; it is turned onto y. Topology depends only on the counts."""
-    t = np.linspace(0.0, 1.0, len(profile))
-    to_y = cast(F64, trimesh.transformations.rotation_matrix(-math.pi / 2, [1.0, 0.0, 0.0]))  # pyright: ignore[reportUnknownMemberType]
-    revolve = cast(Callable[..., trimesh.Trimesh], trimesh.creation.revolve)  # pyright: ignore[reportUnknownMemberType]  # untyped
-    m = revolve(np.column_stack([profile, t]), sections=sections, transform=to_y)
-    return np.asarray(m.vertices, np.float64), np.asarray(m.faces, np.int32)
 
 
 def _bone(name: str, origin: F64, along: F64, b: Bone) -> Element:
