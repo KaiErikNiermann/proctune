@@ -13,7 +13,7 @@ Blender has the pieces (properties with update callbacks, timers, depsgraph hand
 
 Every generated mesh is an `Element` with a `Frame`: an origin, axes, and a scale measured in the element's own size (a bone's length along it, its radius across). Vertices are generated in those normalized coordinates, so "half way along" means the same at any length. Hand edits are stored in the same coordinates:
 
-- a *tweak* (the element moved, turned or scaled as a whole) is an affine map in normalized coordinates;
+- a *tweak* (the element moved, turned or scaled as a whole) is a translation, rotation and scale in the element's frame, with the translation in element sizes so it grows with the element;
 - a *sculpt* is a displacement per vertex, in normalized coordinates for a rigid element, or in a frame per vertex for a surface that bends (a skin's out, along and around directions).
 
 On a rebuild the model regenerates every element from the parameters and the edits are re-applied. A bump sculpted half way along a muscle stays half way along when the bone gets longer; a skin sculpt stays on the same side of the limb when the joint bends. Stages see the elements before them with their edits applied, so the skin wraps a sculpted muscle.
@@ -105,7 +105,7 @@ The first run installs what the example models import (scipy, trimesh, optuna) i
 - the hand edits per element, each with a button to clear it;
 - Open, New (from a `module:attribute`), Save, Rebuild, Reset parameters.
 
-Move, rotate or scale an element with the usual tools, or sculpt or edit it: the change is captured when the grab or stroke ends, and the stages after it rebuild (the skin follows a muscle stroke by stroke). Drag a handle empty to set the parameters it is bound to. A project saves as `NAME.json` (parameters, composites, tweaks, tracks) and `NAME.npz` (sculpts).
+Move, rotate or scale an element with the usual tools, or sculpt or edit it: the change is captured when the grab or stroke ends, and the stages after it rebuild (the skin follows a muscle stroke by stroke). Each movable element's object sits under a hidden empty at the place it was generated, so its Location, Rotation and Scale fields show the move relative to that place (Scale 1.2 is 1.2 times the generated size) and keep showing it through later rebuilds. A bone's move becomes its parameters instead, so its Scale returns to 1 and the slider changes. Every slider that differs from the model's default shows the ratio to it ("length x1.68") and a button to reset it. Moving or scaling the skin, which has no place of its own, is kept as a sculpt of the skin. Drag a handle empty to set the parameters it is bound to. A project saves as `NAME.json` (parameters, composites, tweaks, tracks) and `NAME.npz` (sculpts).
 
 ## When something goes wrong
 
@@ -114,6 +114,7 @@ Every failure proctune can cause says what went wrong and what to do (`proctune.
 - saving into a read-only folder, over a read-only file, into a missing folder, or onto a full disk: nothing half-written is left, the old project stays as it was (every file is written to a temporary file and moved into place);
 - opening a missing file, broken JSON (with line and column), another format, unknown parameters, values outside their ranges (each listed), invalid curves, a corrupt sculpt file;
 - a model module that is not found (with the folders searched), imports a package Blender lacks (named, with the install command), fails on import, or fails while building (with the stage);
+- a hand edit that cannot be kept (a sculpt that changed the vertex count, say): reported once, that object put back, the rest of the edits kept;
 - an interpreter that cannot be started, pip failing, an unreadable config file or unknown config keys.
 
 ## Tuning against targets
