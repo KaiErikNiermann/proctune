@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from proctune.core import Session, specs
 from proctune.core import params as P
 from proctune.core.element import F64, Edit
+from proctune.core.files import relative_or_absolute
 
 
 def _session() -> Session[limb.Limb]:
@@ -180,7 +181,8 @@ def test_project_round_trip(tmp_path: Path) -> None:
     m = np.eye(4)
     m[:3, 3] = [0.0, 0.0, 0.01]
     s.capture_transform("lower bone", m)
-    s.import_paths = (str(Path(limb.__file__).parent.resolve().relative_to(tmp_path.resolve(), walk_up=True)),)
+    # relative where one exists; across Windows drives (checkout on D:, temp on C:) absolute
+    s.import_paths = (relative_or_absolute(Path(limb.__file__).parent, tmp_path),)
     s.save(tmp_path / "p.json")
     t = Session.load(tmp_path / "p.json")
     assert P.to_dict(t.base) == P.to_dict(s.base)  # load reloads the model module: a new class, same values

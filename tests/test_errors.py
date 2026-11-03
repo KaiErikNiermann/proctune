@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -175,7 +176,7 @@ def test_model_name_must_be_module_and_attribute() -> None:
 
 
 def test_missing_model_module_lists_where_it_looked(tmp_path: Path) -> None:
-    with pytest.raises(ProjectError, match=f"not found \\(looked in {tmp_path}") as e:
+    with pytest.raises(ProjectError, match=re.escape(f"not found (looked in {tmp_path}")) as e:
         load_model("no_such_model_xyz:MODEL", (str(tmp_path),))
     assert "import_paths" in _remedy(e)
 
