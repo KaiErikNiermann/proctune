@@ -28,6 +28,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 from proctune.blender import scene
 from proctune.core import Session, Spec, specs
 from proctune.core.params import Path as ParamPath
+from proctune.core.session import describe
 
 if TYPE_CHECKING:
     from bpy.stub_internal.rna_enums import OperatorReturnItems
@@ -276,6 +277,39 @@ class PROCTUNE_OT_open(bpy.types.Operator, ImportHelper):  # pyright: ignore[rep
         return {"FINISHED"}
 
 
+class PROCTUNE_OT_open_stored(bpy.types.Operator):
+    """Open the project this .blend names, after showing what it would import and run"""
+
+    bl_idname = "proctune.open_stored"
+    bl_label = "Open this file's project?"
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> Ret:
+        if STATE.stored is None:
+            return {"CANCELLED"}
+        return context.window_manager.invoke_props_dialog(self, width=520, confirm_text="Open and run its model")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        lay = self.layout
+        if lay is None or STATE.stored is None:
+            return
+        try:
+            info = describe(STATE.stored)
+        except (OSError, ValueError) as e:
+            lay.label(text=f"cannot read {STATE.stored}: {e}", icon="ERROR")
+            return
+        lay.label(text="Opening a project imports and runs its model's Python.", icon="ERROR")
+        lay.label(text=f"Project: {info.path}")
+        lay.label(text=f"Model: {info.model}")
+        for d in info.import_dirs:
+            lay.label(text=f"Imported from: {d}")
+
+    def execute(self, context: bpy.types.Context) -> Ret:
+        if STATE.stored is None:
+            return {"CANCELLED"}
+        open_project(STATE.stored)
+        return {"FINISHED"}
+
+
 class PROCTUNE_OT_new(bpy.types.Operator):
     """Start from a model's defaults: module:attribute, imported from a directory"""
 
@@ -382,12 +416,8 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         row.operator("proctune.save", text="Save", icon="FILE_TICK")
         if s is None:
             if STATE.stored is not None:
-                lay.label(text="This file used a project (runs its model's code):")
-                row = lay.row()
-                row.operator_context = "EXEC_DEFAULT"
-                op = row.operator("proctune.open", text=f"Open {STATE.stored.name}", icon="ERROR")
-                if op is not None:
-                    op.filepath = str(STATE.stored)
+                lay.label(text=f"This file used {STATE.stored}")
+                lay.operator("proctune.open_stored", text="Open it (runs its model's code)", icon="ERROR")
             else:
                 lay.label(text="No project open")
             return
@@ -454,6 +484,7 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
 
 CLASSES: tuple[type, ...] = (
     PROCTUNE_OT_open,
+    PROCTUNE_OT_open_stored,
     PROCTUNE_OT_new,
     PROCTUNE_OT_save,
     PROCTUNE_OT_rebuild,

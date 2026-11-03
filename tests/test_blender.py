@@ -133,3 +133,5 @@ def test_loading_a_blend_does_not_run_its_project(project: None, tmp_path: Path)
     bpy.ops.wm.open_mainfile(filepath=str(tmp_path / "scene.blend"))
     assert addon.STATE.session is None
     assert addon.STATE.stored == tmp_path / "limb.json"
+    bpy.ops.proctune.open_stored("EXEC_DEFAULT")  # what the confirmation dialog's button does
+    assert addon.STATE.session is not None

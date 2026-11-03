@@ -186,3 +186,12 @@ def test_project_round_trip(tmp_path: Path) -> None:
     a, b = s.evaluate(), t.evaluate()
     for name in a.elements:
         np.testing.assert_allclose(a.elements[name].verts, b.elements[name].verts, atol=1e-12)
+
+
+def test_describe_reads_a_project_without_importing(tmp_path: Path) -> None:
+    from proctune.core.session import describe  # noqa: PLC0415
+
+    (tmp_path / "p.json").write_text('{"format": 1, "model": "evil:MODEL", "import_paths": ["../x"]}')
+    info = describe(tmp_path / "p.json")
+    assert info.model == "evil:MODEL"
+    assert info.import_dirs == ((tmp_path / "../x").resolve(),)

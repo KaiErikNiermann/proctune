@@ -173,6 +173,21 @@ class Session[T]:
         return s
 
 
+@dataclass(frozen=True)
+class ProjectInfo:
+    """What opening a project would import, read without importing anything."""
+
+    path: FsPath
+    model: str
+    import_dirs: tuple[FsPath, ...]
+
+
+def describe(path: FsPath) -> ProjectInfo:
+    doc = json.loads(path.read_text())
+    dirs = tuple((path.parent / p).resolve() for p in cast(list[str], doc.get("import_paths", [])))
+    return ProjectInfo(path.resolve(), str(doc.get("model", "")), dirs)
+
+
 def load_model(source: str, import_paths: tuple[str, ...] = ()) -> Model[Any]:
     """Import ``module:attribute`` (after putting `import_paths` first on ``sys.path``) and return that model."""
     module, _, attr = source.partition(":")
