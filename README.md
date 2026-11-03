@@ -108,7 +108,7 @@ python scripts/gui.py path/to/project.json   # any project
 python scripts/gui.py path/to/project.json --install-missing
 ```
 
-Before starting Blender the launcher loads and builds the project with Blender's own Python and prints what is missing and where it looked; with `--install-missing` it installs what is missing, after saying where (the project's package folder, else the configured one, else Blender's). `python scripts/blender_site.py` installs what the example models and the tests need into the checkout's dev folder (`.blender-site`). The panel is in the 3D view's sidebar, tab "proctune":
+Blender opens with the 3D view split in two, navigation kept in step (orbit, pan or zoom either one): the model as built on the left, and on the right only its surface, opaque in one colour, so the real outer shape shows (the panel's **Compare view** toggles it; a model names its surface with `surface_layers`, else its last stage's layers are used). Before starting Blender the launcher loads and builds the project with Blender's own Python and prints what is missing and where it looked; with `--install-missing` it installs what is missing, after saying where (the project's package folder, else the configured one, else Blender's). `python scripts/blender_site.py` installs what the example models and the tests need into the checkout's dev folder (`.blender-site`). The panel is in the 3D view's sidebar, tab "proctune":
 - sliders for every parameter, grouped as the parameter dataclasses are, and for every composite;
 - a curve widget for every curve parameter;
 - layer visibility toggles;

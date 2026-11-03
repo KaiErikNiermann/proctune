@@ -101,6 +101,13 @@ CHECKS = [
     "a curve edit rebuilds the model",
     "arrow keys step the timeline",
     "the model grows along the timeline",
+    "the compare view opens",
+    "the view is split in two",
+    "the left view shows the inner layers",
+    "the right view shows only the surface",
+    "the right view is opaque, one colour",
+    "orbiting the left view turns the right one with it",
+    "and the other way round",
     "project saves with its sculpt",
     "project saves the keyframes as a track",
 ]

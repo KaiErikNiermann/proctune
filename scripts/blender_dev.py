@@ -31,3 +31,13 @@ args = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
 if args:
     remove_default_cube()
     addon.open_reporting(Path(args[0]).resolve())
+
+    import bpy
+
+    if not bpy.app.background:
+        # the side-by-side view, once the window exists: the model on the left, its surface on the right
+
+        def open_compare() -> None:
+            addon.compare()
+
+        bpy.app.timers.register(open_compare, first_interval=0.5)

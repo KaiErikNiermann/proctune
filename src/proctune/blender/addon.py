@@ -29,7 +29,7 @@ from bpy.props import BoolProperty, FloatProperty, IntProperty, PointerProperty,
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from proctune import config, deps
-from proctune.blender import curves, scene, timeline
+from proctune.blender import curves, scene, timeline, views
 from proctune.core import Session, Spec, files, specs
 from proctune.core import params as P
 from proctune.core.params import Path as ParamPath
@@ -262,6 +262,7 @@ def rebuild(*, force: bool = False) -> None:
     stale = result.stale
     STATE.message = f"stale sculpt (topology changed): {', '.join(stale)}" if stale else ""
     STATE.error = None
+    views.refresh()
     if errors:
         raise errors[0]  # the scene is already written back: the failed edit is undone, the rest kept
 
@@ -552,6 +553,38 @@ class PROCTUNE_OT_install(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def surface_layers(s: Session[Any]) -> tuple[str, ...]:
+    """The model's `surface_layers`, else the layers of its last stage's elements."""
+    named = getattr(s.model, "surface_layers", None)
+    if named:
+        return tuple(named)
+    last = s.last or s.evaluate()
+    final = list(last.stages.values())[-1] if last.stages else ()
+    return tuple(dict.fromkeys(last.elements[n].element.layer for n in final))
+
+
+def compare() -> bool:
+    """Open the side-by-side view (left: the model, right: its surface, opaque; navigation in step)."""
+    s = STATE.session
+    return s is not None and views.compare(surface_layers(s))
+
+
+class PROCTUNE_OT_compare(bpy.types.Operator):
+    """Side by side: the model as built on the left, only its surface (opaque) on the right, moving together"""
+
+    bl_idname = "proctune.compare"
+    bl_label = "Compare view"
+
+    def execute(self, context: bpy.types.Context) -> Ret:
+        if views.enabled():
+            views.stop()
+            return {"FINISHED"}
+        if not compare():
+            self.report({"WARNING"}, "no 3D view to split")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 class PROCTUNE_OT_reset_param(bpy.types.Operator):
     """Set this parameter back to the model's default"""
 
@@ -653,6 +686,7 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         row = lay.row(align=True)
         row.operator("proctune.rebuild", icon="FILE_REFRESH")
         row.operator("proctune.defaults", icon="LOOP_BACK")
+        lay.operator("proctune.compare", icon="SPLIT_VERTICAL", depress=views.enabled())
         lay.label(text=f"last rebuild {STATE.last_ms:.0f} ms")
         if STATE.message:
             lay.label(text=STATE.message, icon="ERROR")
@@ -756,6 +790,7 @@ CLASSES: tuple[type, ...] = (
     PROCTUNE_OT_new,
     PROCTUNE_OT_save,
     PROCTUNE_OT_reset_param,
+    PROCTUNE_OT_compare,
     PROCTUNE_OT_rebuild,
     PROCTUNE_OT_clear,
     PROCTUNE_OT_defaults,
@@ -789,6 +824,7 @@ def unregister() -> None:
             h.remove(fn)
     if bpy.app.timers.is_registered(_poll_curves):
         bpy.app.timers.unregister(_poll_curves)
+    views.stop()
     if STATE.group is not None:
         del bpy.types.Scene.proctune_params
         bpy.utils.unregister_class(STATE.group)

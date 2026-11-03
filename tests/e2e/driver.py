@@ -300,6 +300,8 @@ def scenario() -> Iterator[None]:  # noqa: PLR0915 -- one linear story, step by 
     yield from skin_scale(s)
     yield from curve_and_timeline(s)
 
+    yield from compare_view()
+
     out = OUT / "saved.json"
     addon.save_project(out)
     R.check("project saves with its sculpt", out.exists() and out.with_suffix(".npz").exists())
@@ -462,6 +464,59 @@ def curve_and_timeline(s: Any) -> Iterator[None]:
     R.check("arrow keys step the timeline", sc.frame_current == 11, f"frame {sc.frame_current}")
     R.check("the model grows along the timeline", big > small * 2.5, f"bone top {small:.3f} -> {big:.3f} m")
     screenshot("grown")
+
+
+def compare_view() -> Iterator[None]:
+    """The side-by-side view: the model on the left, only its surface (opaque) on the right, orbiting together."""
+    from proctune.blender import views  # noqa: PLC0415
+
+    R.check("the compare view opens", addon.compare())
+    for _ in range(6):
+        yield
+    areas = sorted((a for a in window().screen.areas if a.type == "VIEW_3D"), key=lambda a: a.x)
+    R.check("the view is split in two", len(areas) == 2, f"{len(areas)} 3D views")
+    if len(areas) != 2:
+        return
+    left, right = areas
+    lspace = cast(bpy.types.SpaceView3D, left.spaces[0])
+    rspace = cast(bpy.types.SpaceView3D, right.spaces[0])
+    muscle, skin = bpy.data.objects["muscle"], bpy.data.objects["skin"]
+    R.check(
+        "the left view shows the inner layers",
+        muscle.visible_get(viewport=lspace) and skin.visible_get(viewport=lspace),
+    )
+    R.check(
+        "the right view shows only the surface",
+        skin.visible_get(viewport=rspace) and not muscle.visible_get(viewport=rspace),
+    )
+    R.check("the right view is opaque, one colour", rspace.shading.color_type == "SINGLE")
+
+    def orbit(area: bpy.types.Area) -> Iterator[None]:
+        region = next(r for r in area.regions if r.type == "WINDOW")
+        c = (region.x + region.width // 2, region.y + region.height // 2)
+        yield from move_to(c)
+        event("MIDDLEMOUSE", "PRESS", c)
+        yield
+        for k in range(1, 9):
+            yield from move_to((c[0] + 12 * k, c[1] + 4 * k))
+        event("MIDDLEMOUSE", "RELEASE", (c[0] + 96, c[1] + 32))
+        for _ in range(4):
+            yield
+
+    def rotation(area: bpy.types.Area) -> list[float]:
+        q = views.region_3d(area).view_rotation
+        return [q.w, q.x, q.y, q.z]
+
+    def same() -> bool:
+        return bool(np.allclose(rotation(left), rotation(right), atol=1e-5))
+
+    before = rotation(right)
+    yield from orbit(left)
+    turned = not np.allclose(before, rotation(right), atol=1e-5)
+    R.check("orbiting the left view turns the right one with it", turned and same())
+    yield from orbit(right)
+    R.check("and the other way round", same())
+    screenshot("compare")
 
 
 def _changed_pixels(a: str, b: str) -> int:

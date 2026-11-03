@@ -468,6 +468,7 @@ class LimbModel:
     layer_colours: dict[str, tuple[float, float, float, float]] = field(
         default_factory=lambda: {"wrap skin": (0.55, 0.68, 0.85, 0.45)}
     )
+    surface_layers: tuple[str, ...] = ("skin",)
 
     def defaults(self) -> Limb:
         return Limb()
