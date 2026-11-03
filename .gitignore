@@ -5,3 +5,4 @@ __pycache__/
 .upstream-issues/
 *.blend1
 .blender-site/
+LOG.md
