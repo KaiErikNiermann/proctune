@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "model": "limb:MODEL",
+  "import_paths": [
+    "."
+  ],
+  "params": {
+    "upper": {
+      "length": 0.3,
+      "radius": 0.016,
+      "flare": 0.35
+    },
+    "lower": {
+      "length": 0.26,
+      "radius": 0.013,
+      "flare": 0.35
+    },
+    "joint_deg": 15.0,
+    "muscle": {
+      "belly": 0.024,
+      "centre": 0.45,
+      "width": 0.2,
+      "tendon": 0.004,
+      "origin": 0.15,
+      "insertion": 0.04,
+      "lift": 0.02
+    },
+    "skin": {
+      "thickness": 0.004,
+      "smoothing": 2.0,
+      "corner": 0.004
+    }
+  },
+  "composites": {
+    "flex": 0.0,
+    "size": 0.0
+  },
+  "tweaks": {}
+}
