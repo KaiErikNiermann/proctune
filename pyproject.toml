@@ -1,0 +1,52 @@
+[project]
+name = "proctune"
+version = "0.1.0"
+description = "Live sliders, handles and regeneration-proof sculpting for procedural models in Blender"
+requires-python = ">=3.13,<3.15"
+dependencies = ["numpy (>=2.3,<3.0)"]
+
+[project.optional-dependencies]
+# proctune.core.tune works with any optimizer whose trials look like Optuna's; Optuna is the one tested
+tune = ["optuna (>=4.0)"]
+
+[tool.poetry]
+packages = [{ include = "proctune", from = "src" }]
+
+[tool.poetry.group.dev.dependencies]
+ruff = "*"
+pyright = "*"
+pytest = "*"
+scipy = "^1.18.1"
+trimesh = "^5.2.0"
+fake-bpy-module = "^20261031"
+scipy-stubs = "^1.18.1.1"
+optuna = "^5.0.0"
+
+[tool.poetry.group.blender.dependencies]
+bpy = { version = "==5.2.3", python = ">=3.13,<3.14" }
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PL", "N", "C4", "PIE", "PT", "RET"]
+ignore = ["PLR2004", "PLR0913", "PT018", "N812"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/proctune/blender/*" = ["N801"]  # Blender requires PREFIX_OT_name class names
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+include = ["src", "examples", "tests"]
+extraPaths = ["examples/limb"]
+# bpy is typed by fake-bpy-module (stubs only); the real module is the bpy wheel or Blender itself
+reportMissingModuleSource = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
