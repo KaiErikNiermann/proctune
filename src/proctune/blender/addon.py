@@ -62,6 +62,8 @@ class State:
     message: str = ""
     error: ProctuneError | None = None
     """The last failure, shown in the panel with its remedy until the next successful rebuild"""
+    retry: Path | None = None
+    """A project that failed to open for want of packages: opened again once they are installed"""
     stored: Path | None = None
     """The project a loaded .blend names, offered in the panel; never opened by itself"""
 
@@ -334,9 +336,21 @@ def _start(session: Session[Any], path: Path | None) -> None:
 
 
 def open_project(path: Path) -> Session[Any]:
-    session = Session.load(path)
+    try:
+        session = Session.load(path)
+    except MissingDependenciesError:
+        STATE.retry = path
+        raise
+    STATE.retry = None
     _start(session, path)
     return session
+
+
+def open_reporting(path: Path) -> None:
+    """Open a project from a script (the dev launcher): a failure shows in the panel, with its remedy, instead of only
+    as a traceback in the console."""
+    with guarded(f"opening {path}"):
+        open_project(path)
 
 
 def new_project(source: str, import_dir: Path) -> Session[Any]:
@@ -480,6 +494,11 @@ class PROCTUNE_OT_install(bpy.types.Operator):
             return report(self, e)
         STATE.error = None
         self.report({"INFO"}, f"installed {', '.join(r.installed) or 'nothing'} into {r.target}")
+        if STATE.retry is not None:  # the project that needed them
+            try:
+                open_project(STATE.retry)
+            except ProctuneError as e:
+                return report(self, e)
         return {"FINISHED"}
 
 

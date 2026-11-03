@@ -13,4 +13,4 @@ from proctune.blender import addon  # noqa: E402
 addon.register()
 args = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
 if args:
-    addon.open_project(Path(args[0]).resolve())
+    addon.open_reporting(Path(args[0]).resolve())

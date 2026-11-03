@@ -65,7 +65,7 @@ class MyModel:
         ...
 ```
 
-`examples/limb/limb.py` is a complete model: two bones and a joint, a muscle with a bell-shaped belly across the joint, a fat deposit along each bone, a skin swept over everything, growth and fat curves, the composites `flex` (bend and bunch the muscle) and `size`, handles at the elbow and wrist, and bone moves bound to parameters.
+Meshes with a fixed vertex layout for common primitives (sphere, round cone, solid of revolution, prism) are in `proctune.shapes` (needs trimesh). `examples/limb/limb.py` is a complete model: two bones and a joint, a muscle with a bell-shaped belly across the joint, a fat deposit along each bone, a skin swept over everything, growth and fat curves, the composites `flex` (bend and bunch the muscle) and `size`, handles at the elbow and wrist, and bone moves bound to parameters.
 
 ## Platforms
 
@@ -79,7 +79,7 @@ Nothing in the add-on hardcodes a path. Blender's own interpreter, its user `scr
 
 ## Installing
 
-The add-on needs numpy (every Blender has it) and scipy (for curve parameters); a model may need more (the limb example: trimesh). Missing packages are never a silent failure: the panel names them and offers **Install missing packages**, which runs pip with Blender's own Python into Blender's user `scripts/modules` (or the configured `packages` folder), leaving out what Blender already has, so its numpy is never shadowed. The same from a terminal:
+The add-on needs numpy (every Blender has it) and scipy (for curve parameters); a model may need more (the limb example: trimesh). Missing packages are never a silent failure: the panel names them and offers **Install missing packages** (which then opens the project that needed them), which runs pip with Blender's own Python into Blender's user `scripts/modules` (or the configured `packages` folder), leaving out what Blender already has, so its numpy is never shadowed. The same from a terminal:
 
 ```sh
 blender -b --python-expr "from proctune import deps; deps.install_into_blender(['scipy', 'trimesh'])"

@@ -22,6 +22,7 @@ import pytest
 
 from proctune.core import Element, Frame, Range, Resolved, Session, Stage
 from proctune.errors import MissingDependenciesError
+from proctune.shapes import revolution
 
 EXAMPLE = Path(limb.__file__).parent
 ROOT_USER = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -60,7 +61,7 @@ class Many:
 
 
 def _tubes(p: Many, _: Mapping[str, Resolved]) -> tuple[Element, ...]:
-    local, faces = limb.revolution(np.full(limb.RINGS, 1.0))
+    local, faces = revolution(np.full(limb.RINGS, 1.0))
     return tuple(
         Element(
             f"tube {i}",
@@ -221,6 +222,48 @@ def test_missing_packages_offer_the_install_button(monkeypatch: pytest.MonkeyPat
         e = addon.STATE.error
         assert isinstance(e, MissingDependenciesError)
         assert e.packages == ("scipy",)
+    finally:
+        addon.unregister()
+        addon.STATE.__init__()
+
+
+def test_installing_reopens_the_project_that_needed_the_packages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A project whose model imports a missing package shows the install button; installing reopens it."""
+    from proctune import deps  # noqa: PLC0415
+
+    model_dir = tmp_path / "m"
+    model_dir.mkdir()
+    (model_dir / "needs_pkg_xyz.py").write_text("import pkg_not_there_xyz\n")
+    project = tmp_path / "p.json"
+    project.write_text('{"format": 2, "model": "needs_pkg_xyz:MODEL", "import_paths": ["m"]}')
+    bpy.ops.wm.read_homefile(use_empty=True)
+    addon.register()
+    try:
+        addon.open_reporting(project)
+        e = addon.STATE.error
+        assert isinstance(e, MissingDependenciesError)
+        assert e.packages == ("pkg_not_there_xyz",)
+        assert addon.STATE.retry == project
+
+        def fake_install(names: Iterable[str]) -> deps.InstallResult:
+            # the package appears: the model module now imports, and defines the limb's model
+            (model_dir / "pkg_not_there_xyz.py").write_text("")
+            code = [
+                "import sys",
+                f"sys.path.insert(0, {str(EXAMPLE)!r})",
+                "import pkg_not_there_xyz",
+                "from limb import MODEL",
+            ]
+            (model_dir / "needs_pkg_xyz.py").write_text("\n".join(code) + "\n")
+            return deps.InstallResult(tuple(names), (), tmp_path)
+
+        monkeypatch.setattr(deps, "install_into_blender", fake_install)
+        bpy.ops.proctune.install(packages="pkg_not_there_xyz")
+        assert addon.STATE.error is None
+        assert addon.STATE.session is not None
+        assert "muscle" in bpy.data.objects
     finally:
         addon.unregister()
         addon.STATE.__init__()
