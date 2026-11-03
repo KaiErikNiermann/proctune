@@ -230,11 +230,17 @@ def scenario() -> Iterator[None]:  # noqa: PLR0915 -- one linear story, step by 
     ]
     stroke = [to_window(p) for p in axis_pts]
     skin_before = verts("skin")
+    rebuilds_before = addon.STATE.rebuilds
     yield from drag(stroke)
     yield from settle()
     edit = s.edits.get("muscle")
     R.check("still in sculpt mode", bpy.context.object is not None and bpy.context.object.mode == "SCULPT")
-    R.check("stroke is captured as a sculpt", edit is not None and edit.displacement is not None)
+    R.check(
+        "stroke is captured as a sculpt",
+        edit is not None and edit.displacement is not None,
+        f"pending {addon.STATE.pending}, rebuilds {addon.STATE.rebuilds - rebuilds_before}, "
+        f"edits seen now {bool(scene.hand_edits(addon.STATE.written))}",
+    )
     if edit is not None and edit.displacement is not None:
         R.check(
             "sculpt is not empty",

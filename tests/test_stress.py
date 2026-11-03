@@ -180,13 +180,14 @@ def test_a_crashing_model_shows_in_the_panel_and_keeps_the_mesh(project: None, m
 
     monkeypatch.setattr(limb, "fat", broken)
     addon.STATE.pending = True
+    addon.STATE.changed = True
     addon._tick()  # pyright: ignore[reportPrivateUsage]  # what the timer runs; must not raise
     e = addon.STATE.error
     assert e is not None
     assert "stage 'fat' failed" in e.message
     np.testing.assert_array_equal(scene.read_verts(bpy.data.objects["skin"]), before)
     monkeypatch.undo()
-    addon.rebuild()
+    addon.rebuild(force=True)
     assert addon.STATE.error is None  # cleared by the next good rebuild
 
 
@@ -267,3 +268,22 @@ def test_installing_reopens_the_project_that_needed_the_packages(
     finally:
         addon.unregister()
         addon.STATE.__init__()
+
+
+def test_our_own_writes_do_not_trigger_rebuilds(project: None) -> None:
+    """A rebuild writes every mesh, and Blender reports those writes as updates; rebuilding on each of those rebuilt
+    without end (with the 0.4 s synth-hand model the whole editor lagged, panning included). The update may schedule
+    a check, but the check must find nothing to do and build nothing."""
+    bpy.context.scene.proctune_params.joint_deg = 20.0
+    addon.rebuild()
+    count = addon.STATE.rebuilds
+    for _ in range(5):
+        bpy.context.view_layer.update()  # Blender reports the writes
+        if addon.STATE.pending:
+            addon._tick()  # pyright: ignore[reportPrivateUsage]  # what the timer runs
+    assert addon.STATE.rebuilds == count, "our own write led to another rebuild"
+    bpy.data.objects["muscle"].location = (0.0, 0.01, 0.0)
+    bpy.context.view_layer.update()
+    assert addon.STATE.pending  # a real hand edit schedules
+    addon._tick()  # pyright: ignore[reportPrivateUsage]
+    assert addon.STATE.rebuilds == count + 1  # and builds

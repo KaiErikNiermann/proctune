@@ -57,6 +57,9 @@ class State:
     keys: dict[str, ParamPath] = field(default_factory=dict[str, ParamPath])
     syncing: bool = False
     pending: bool = False
+    changed: bool = False
+    """A parameter, curve or frame changed since the last rebuild (hand edits are found by comparing the scene)"""
+    rebuilds: int = 0
     dragged: frozenset[str] = frozenset()
     last_ms: float = 0.0
     message: str = ""
@@ -109,7 +112,7 @@ def _on_param(key: str) -> Any:
                 s.set_composite(path[1], float(value))
             else:
                 s.set(path, value)
-            schedule()
+            mark_changed()
 
     return update
 
@@ -207,6 +210,12 @@ def _modal_running() -> bool:
     return wm is not None and any(len(w.modal_operators) > 0 for w in wm.windows)
 
 
+def mark_changed() -> None:
+    """Something the model depends on changed: the next rebuild must build (not only look for hand edits)."""
+    STATE.changed = True
+    schedule()
+
+
 def schedule() -> None:
     if not STATE.pending:
         STATE.pending = True
@@ -222,17 +231,23 @@ def _tick() -> float | None:
     return None
 
 
-def rebuild() -> None:
-    """Capture hand edits, evaluate, write. Safe to call directly (tests, the Rebuild button)."""
+def rebuild(*, force: bool = False) -> None:
+    """Capture hand edits, evaluate, write; nothing at all when nothing changed (no parameter, curve or frame change,
+    no hand edit), unless `force`d (opening a project, the Rebuild button). Safe to call directly."""
     s = STATE.session
     if s is None:
         return
     t = time.perf_counter()
-    for name, pos in scene.moved_handles(STATE.written).items():
+    moved, turned = scene.moved_handles(STATE.written), scene.turned_handles(STATE.written)
+    for name, pos in moved.items():
         s.drag(name, pos)
-    for name, rot in scene.turned_handles(STATE.written).items():
+    for name, rot in turned.items():
         s.turn(name, rot)
     edits = scene.hand_edits(STATE.written)
+    if not (force or STATE.changed or moved or turned or edits):
+        return
+    STATE.changed = False
+    STATE.rebuilds += 1
     errors: list[ProctuneError] = []
     if edits:
         if s.last is None:
@@ -275,6 +290,8 @@ def _notice(depsgraph: bpy.types.Depsgraph) -> None:
                 schedule()
                 return
         elif scene.ELEMENT_KEY in obj and (u.is_updated_transform or u.is_updated_geometry):
+            # our own writes come back here too, and mid-stroke a sculpt is not in the mesh yet, so nothing is decided
+            # here: the rebuild compares with what it wrote and does nothing (and writes nothing) when nothing changed
             schedule()
             return
 
@@ -290,22 +307,29 @@ def _on_frame(_scene: bpy.types.Scene, _depsgraph: bpy.types.Depsgraph) -> None:
         values = timeline.current_values(STATE.keys)
         if values:
             s.apply(values)
-            rebuild()
+            rebuild(force=True)
 
 
 CURVE_POLL_S = 0.2
 
 
 def _poll_curves() -> float:
-    """Curve widgets fire no update: compare their points with the session's curves."""
+    """What fires no usable update: curve widgets (compare their points with the session's curves), and a sculpt or
+    an edit in progress (Blender reports a stroke before its vertices reach the mesh, and nothing after: compare the
+    object being sculpted or edited with what was written to it)."""
     s = STATE.session
+    obj = bpy.context.view_layer.objects.active if bpy.context.view_layer else None
+    if s is not None and obj is not None and scene.ELEMENT_KEY in obj and obj.mode in ("SCULPT", "EDIT"):
+        with guarded("noticing a sculpt"):
+            if not STATE.pending and not _modal_running() and scene.edited(obj, STATE.written):
+                schedule()
     if s is not None:
         with guarded("reading the curve widgets"):
             changes = curves.changed(s)
             for path, c in changes.items():
                 s.set(path, c)
             if changes:
-                schedule()
+                mark_changed()
     return CURVE_POLL_S
 
 
@@ -332,7 +356,7 @@ def _start(session: Session[Any], path: Path | None) -> None:
     if path is not None:
         bpy.context.scene[PROJECT_KEY] = str(path)
     curves.write(session)
-    rebuild()
+    rebuild(force=True)
 
 
 def open_project(path: Path) -> Session[Any]:
@@ -541,7 +565,7 @@ class PROCTUNE_OT_reset_param(bpy.types.Operator):
         if s is None or path is None:
             return {"CANCELLED"}
         s.set(path, P.get(s.model.defaults(), path))
-        rebuild()
+        rebuild(force=True)
         return {"FINISHED"}
 
 
@@ -553,7 +577,7 @@ class PROCTUNE_OT_rebuild(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> Ret:
         try:
-            rebuild()
+            rebuild(force=True)
         except ProctuneError as e:
             return report(self, e)
         return {"FINISHED"}
@@ -594,7 +618,7 @@ class PROCTUNE_OT_defaults(bpy.types.Operator):
         s.base = s.model.defaults()
         s.composites = {c.name: c.default for c in s.model.composites}
         curves.write(s)
-        rebuild()
+        rebuild(force=True)
         return {"FINISHED"}
 
 

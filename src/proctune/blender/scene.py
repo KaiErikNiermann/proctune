@@ -254,6 +254,18 @@ class HandEdits:
         return bool(self.moved or self.sculpted)
 
 
+def edited(obj: bpy.types.Object, written: Written) -> bool:
+    """Whether an element's object differs from what was last written to it (its transform or its vertices)."""
+    name = str(obj[ELEMENT_KEY])
+    before, last = written.basis.get(name), written.verts.get(name)
+    if before is None or last is None:
+        return False
+    if not np.allclose(_world(obj), before, atol=1e-6):
+        return True
+    v = read_verts(obj)
+    return v.shape != last.shape or float(np.abs(v - last).max()) > 1e-6
+
+
 def hand_edits(written: Written) -> HandEdits:
     moved: dict[str, tuple[F64, F64]] = {}
     sculpted: dict[str, F64] = {}
