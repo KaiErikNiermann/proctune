@@ -247,7 +247,7 @@ def test_installing_reopens_the_project_that_needed_the_packages(
         assert e.packages == ("pkg_not_there_xyz",)
         assert addon.STATE.retry == project
 
-        def fake_install(names: Iterable[str]) -> deps.InstallResult:
+        def fake_install(names: Iterable[str], target: Path | None = None) -> deps.InstallResult:
             # the package appears: the model module now imports, and defines the limb's model
             (model_dir / "pkg_not_there_xyz.py").write_text("")
             code = [

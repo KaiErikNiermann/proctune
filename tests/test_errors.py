@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -305,3 +307,109 @@ def test_numpy_is_never_installed_twice() -> None:
     """Blender's own numpy must stay the one imported: it is in CORE but always present where proctune runs."""
     assert deps.missing(deps.CORE[:1]) == ()
     assert np.__version__
+
+
+# ------------------------------------------------------------------------------------------------- where packages are
+
+
+def test_the_install_command_in_the_hint_runs_as_printed(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(deps, "install_into_blender", lambda names, target=None: calls.append(list(names)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    hint = deps.install_hint(["scikit-image"])
+    expr = re.search(r'--python-expr "(.+?)"`', hint)
+    assert expr is not None
+    exec(expr.group(1), {})
+    assert calls == [["scikit-image"]]
+
+
+def test_the_hint_says_which_python_looked_and_where_it_would_install() -> None:
+    env = deps.environment()
+    hint = deps.install_hint(["x"])
+    assert env.python in hint
+    assert env.version in hint
+    assert env.target in hint
+    assert "paths" in hint
+    assert any(line.startswith("  ") for line in env.lines())  # the searched folders, one per line
+
+
+def test_folders_for_another_python_are_flagged(tmp_path: Path) -> None:
+    other = tmp_path / "venv" / "lib" / "python3.9" / "site-packages"
+    other.mkdir(parents=True)
+    v = sys.version_info
+    same = tmp_path / "venv2" / "lib" / f"python{v.major}.{v.minor}" / "site-packages"
+    same.mkdir(parents=True)
+    assert deps.version_mismatch(other) is not None
+    assert deps.version_mismatch(same) is None
+    warnings = deps.add_paths([other, same, tmp_path / "nope"])
+    assert any("3.9" in w for w in warnings)
+    assert any("does not exist" in w for w in warnings)
+    assert str(same) in sys.path
+    for p in (str(other), str(same)):
+        if p in sys.path:
+            sys.path.remove(p)
+
+
+def test_paths_from_the_config_file_and_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('paths = ["~/a", "/b"]\n')
+    monkeypatch.setenv("PROCTUNE_CONFIG", str(cfg))
+    assert config.load().paths == (Path.home() / "a", Path("/b"))
+    monkeypatch.setenv("PROCTUNE_PATHS", os.pathsep.join(["/c", "/d"]))
+    assert config.load().paths == (Path("/c"), Path("/d"))
+    cfg.write_text('paths = "/not/a/list"\n')
+    monkeypatch.delenv("PROCTUNE_PATHS")
+    with pytest.raises(ProctuneError, match="list of folder paths"):
+        config.load()
+
+
+def test_a_project_says_where_its_packages_are(tmp_path: Path) -> None:
+    pkgs = tmp_path / "pkgs"
+    pkgs.mkdir()
+    path = _project(tmp_path, package_paths=["pkgs"])
+    s = Session.load(path)
+    assert str(pkgs.resolve()) in sys.path
+    assert s.package_paths == ("pkgs",)
+    s.save(tmp_path / "again.json")
+    assert json.loads((tmp_path / "again.json").read_text())["package_paths"] == ["pkgs"]
+    sys.path.remove(str(pkgs.resolve()))
+
+
+def test_a_package_missing_while_building_is_a_missing_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _session()
+
+    def needs_it(*_: object) -> tuple[()]:
+        import pkg_imported_late_xyz  # noqa: F401, PLC0415  # pyright: ignore[reportMissingImports, reportUnusedImport]
+
+        return ()
+
+    monkeypatch.setattr(limb, "fat", needs_it)
+    with pytest.raises(MissingDependenciesError, match="stage 'fat' imports pkg_imported_late_xyz") as e:
+        s.evaluate()
+    assert e.value.packages == ("pkg_imported_late_xyz",)
+
+
+PREFLIGHT_BLENDER = config.load().blender
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which(PREFLIGHT_BLENDER) is None, reason="needs blender (Linux)")
+def test_the_launcher_reports_and_installs_nothing_unless_asked(tmp_path: Path) -> None:
+    (tmp_path / "needs_late_pkg_model.py").write_text("import pkg_preflight_missing_xyz\nMODEL = None\n")
+    project = tmp_path / "p.json"
+    project.write_text(
+        '{"format": 2, "model": "needs_late_pkg_model:MODEL", "import_paths": ["."], "package_paths": ["pkgs"]}'
+    )
+    (tmp_path / "pkgs").mkdir()
+    root = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    script = str(root / "scripts" / "preflight.py")
+    r = subprocess.run(
+        [PREFLIGHT_BLENDER, "-b", "--factory-startup", "--python", script, "--", str(project)],
+        env=env, capture_output=True, text=True, timeout=120, check=False,
+    )  # fmt: skip
+    last = next(line for line in reversed(r.stdout.splitlines()) if line.startswith("PROCTUNE_PREFLIGHT "))
+    report = json.loads(last.removeprefix("PROCTUNE_PREFLIGHT "))
+    assert report["missing"] == ["pkg_preflight_missing_xyz"]
+    assert report["installed"] == []
+    assert "looked in" in r.stdout
+    assert f"{tmp_path / 'pkgs'}" in r.stdout  # the project's own package folder is among the folders searched
+    assert list((tmp_path / "pkgs").iterdir()) == []

@@ -12,7 +12,11 @@ def setup() -> Path:
         sys.path.insert(0, str(ROOT / "src"))
     from proctune import config  # noqa: PLC0415
 
-    site = str(config.load().dev_site)
+    cfg = config.load()
+    site = str(cfg.dev_site)
     if site not in sys.path:
         sys.path.append(site)
+    from proctune import deps  # noqa: PLC0415
+
+    deps.add_paths(cfg.paths)
     return ROOT

@@ -478,6 +478,18 @@ class PROCTUNE_OT_save(bpy.types.Operator, ExportHelper):  # pyright: ignore[rep
         return {"FINISHED"}
 
 
+def _install_target() -> Path | None:
+    """The first package folder the project that needs the packages declares, if it declares one."""
+    if STATE.retry is None:
+        return None
+    try:
+        doc = files.read_json(STATE.retry)
+    except ProctuneError:
+        return None
+    folders = cast(list[str], doc.get("package_paths", []))
+    return (STATE.retry.parent / folders[0]).resolve() if folders else None
+
+
 class PROCTUNE_OT_install(bpy.types.Operator):
     """Install missing Python packages into Blender's Python (pip, into Blender's user scripts/modules or the
     configured folder); needs a network connection"""
@@ -486,10 +498,24 @@ class PROCTUNE_OT_install(bpy.types.Operator):
     bl_label = "Install missing packages"
     packages: StringProperty(description="Comma-separated pip packages")  # pyright: ignore[reportInvalidTypeForm]
 
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> Ret:
+        return context.window_manager.invoke_props_dialog(self, width=560, confirm_text="Install")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        lay = self.layout
+        if lay is None:
+            return
+        env = deps.environment()
+        lay.label(text=f"Install {self.packages.replace(',', ', ')} with pip", icon="IMPORT")
+        lay.label(text=f"for Python {env.version} at {env.python}")
+        lay.label(text=f"into {_install_target() or env.target}")
+        lay.label(text="To use your own environment instead, add its site-packages to `paths` in")
+        lay.label(text=f"{env.config} (or PROCTUNE_PATHS) and restart Blender.")
+
     def execute(self, context: bpy.types.Context) -> Ret:
         names = [p.strip() for p in self.packages.split(",") if p.strip()]
         try:
-            r = deps.install_into_blender(names)
+            r = deps.install_into_blender(names, _install_target())
         except ProctuneError as e:
             return report(self, e)
         STATE.error = None
@@ -639,6 +665,7 @@ class PROCTUNE_PT_panel(bpy.types.Panel):
         for line in textwrap.wrap(e.remedy, 48):
             box.label(text=line, icon="BLANK1")
         if isinstance(e, MissingDependenciesError):
+            box.operator_context = "INVOKE_DEFAULT"  # confirm what goes where first
             op = box.operator("proctune.install", icon="IMPORT")
             if op is not None:
                 op.packages = ",".join(e.packages)
@@ -718,6 +745,8 @@ def register() -> None:
     with guarded("checking proctune's packages"):
         cfg = config.load()
         deps.ensure_on_path(cfg.packages or deps.blender_modules())
+        warnings = deps.add_paths(cfg.paths)
+        STATE.message = "; ".join(warnings)
         deps.require(deps.CORE, "proctune")
     bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     bpy.app.handlers.load_post.append(_on_load)

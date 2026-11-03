@@ -11,6 +11,7 @@ import dataclasses
 import importlib
 import io
 import json
+import logging
 import sys
 import zipfile
 from collections.abc import Mapping
@@ -28,6 +29,7 @@ from proctune.core.element import Edit, Element, Resolved, Tweak, capture_sculpt
 from proctune.core.model import F64, Binds, Handle, Model
 from proctune.errors import EditError, MissingDependenciesError, ModelError, ProctuneError, ProjectError
 
+log = logging.getLogger("proctune")
 FORMAT = 2
 type Track = tuple[tuple[float, float], ...]
 """(frame, value) samples"""
@@ -60,6 +62,9 @@ class Session[T]:
     source: str = ""
     """``module:attribute`` of the model, kept for saving"""
     import_paths: tuple[str, ...] = ()
+    package_paths: tuple[str, ...] = ()
+    """Folders (relative to the project file) where the project expects its model's packages, added to the import
+    path after the interpreter's own; the first is where installing for this project puts them"""
     last: Result | None = None
 
     @staticmethod
@@ -134,6 +139,17 @@ class Session[T]:
                 built: tuple[Element, ...] = stage.build(p, dict(done))
             except ProctuneError:
                 raise
+            except ModuleNotFoundError as e:
+                # a package the model imports only while building (inside a function)
+                req = deps.requirement(e.name or "?", f"model {self.model.name}")
+                log.warning(
+                    "stage %s cannot import %s; %s", stage.name, req.package, "\n".join(deps.environment().lines())
+                )
+                raise MissingDependenciesError(
+                    f"{self.model.name}: stage {stage.name!r} imports {req.package}, which this Python lacks",
+                    deps.install_hint([req.package]),
+                    (req.package,),
+                ) from e
             except Exception as e:
                 raise ModelError(
                     f"{self.model.name}: stage {stage.name!r} failed: {type(e).__name__}: {e}",
@@ -212,6 +228,7 @@ class Session[T]:
             "format": FORMAT,
             "model": self.source,
             "import_paths": list(self.import_paths),
+            "package_paths": list(self.package_paths),
             "params": P.to_dict(self.base),
             "composites": self.composites,
             "tracks": {n: [list(fv) for fv in t] for n, t in self.tracks.items()},
@@ -251,8 +268,11 @@ class Session[T]:
         if not isinstance(source, str):
             raise ProjectError(f"{path}: no model named", 'the file needs "model": "module:attribute"')
         paths = tuple(cast(list[str], doc.get("import_paths", [])))
+        packages = tuple(cast(list[str], doc.get("package_paths", [])))
+        deps.add_paths((path.parent / p).resolve() for p in packages)
         model = load_model(source, tuple(str((path.parent / p).resolve()) for p in paths), path)
         s = Session.new(model, source, paths)
+        s.package_paths = packages
         try:
             s.base = P.from_dict(cast(type[Any], type(s.base)), doc.get("params", {}))
             P.validate(s.base)
@@ -326,6 +346,7 @@ def load_model(source: str, import_paths: tuple[str, ...] = (), project: FsPath 
                 "check the project's import_paths point at the folder holding the model's .py file",
             ) from e
         req = deps.requirement(e.name or "?", f"model {source}")
+        log.warning("model %s cannot import %s; %s", source, req.package, "\n".join(deps.environment().lines()))
         raise MissingDependenciesError(
             f"{where}model {source} imports {req.package}, which this Python lacks",
             deps.install_hint([req.package]),

@@ -79,12 +79,11 @@ Nothing in the add-on hardcodes a path. Blender's own interpreter, its user `scr
 
 ## Installing
 
-The add-on needs numpy (every Blender has it) and scipy (for curve parameters); a model may need more (the limb example: trimesh). Missing packages are never a silent failure: the panel names them and offers **Install missing packages** (which then opens the project that needed them), which runs pip with Blender's own Python into Blender's user `scripts/modules` (or the configured `packages` folder), leaving out what Blender already has, so its numpy is never shadowed. The same from a terminal:
+The add-on needs numpy (every Blender has it) and scipy (for curve parameters); a model may need more (the limb example: trimesh and libigl; synth-hand: scikit-image). proctune never installs anything unasked, and never guesses where your packages are: a missing package is reported with which Python looked (path and version), every folder it searched, and where an install would go.
 
-```sh
-blender -b --python-expr "from proctune import deps; deps.install_into_blender(['scipy', 'trimesh'])"
-python -m proctune.deps scipy trimesh        # for a plain Python, into its user site-packages
-```
+- **Your own environment:** add its site-packages (made for Blender's Python version) to `paths` in the proctune config (or `PROCTUNE_PATHS`). They are added to Blender's import path after its own folders; a folder for another Python version is flagged, as its compiled packages would not load.
+- **A project's own folder:** a project can name folders, relative to its file, where its model's packages live (`"package_paths": ["../site"]` in the project JSON). They are searched too, and installing for that project goes into the first one.
+- **Installing:** the panel's **Install missing packages** first shows what it will install, for which Python, into which folder; then it runs pip with Blender's own Python, leaving out what that Python already has (so Blender's numpy is never shadowed), and opens the project that needed the packages. Without a project folder the target is the configured `packages` folder, else Blender's user `scripts/modules`. From a terminal, the error message gives the same as a command to paste.
 
 Official Blender builds that ship without pip get it bootstrapped with `ensurepip` on first use.
 
@@ -95,6 +94,7 @@ Optional, per machine: `~/.config/proctune/config.toml` on Linux (`$XDG_CONFIG_H
 | Key | Environment | Default | What |
 | --- | --- | --- | --- |
 | `blender` | `PROCTUNE_BLENDER` | `blender` | The Blender executable (dev scripts, tests) |
+| `paths` | `PROCTUNE_PATHS` (`os.pathsep`-separated) | none | Folders added to Blender's import path (your own environment's site-packages) |
 | `packages` | `PROCTUNE_PACKAGES` | Blender's user `scripts/modules` | Where missing packages are installed |
 | `dev_site` | `PROCTUNE_DEV_SITE` | `.blender-site` in the checkout | Packages for the dev scripts and tests |
 | `xvfb_run` | `PROCTUNE_XVFB_RUN` | `xvfb-run` | Virtual display wrapper (end-to-end tests) |
@@ -104,10 +104,11 @@ Optional, per machine: `~/.config/proctune/config.toml` on Linux (`$XDG_CONFIG_H
 
 ```sh
 python scripts/gui.py                        # opens examples/limb/limb.json (Linux, from a checkout)
-python scripts/gui.py path/to/project.json
+python scripts/gui.py path/to/project.json   # any project
+python scripts/gui.py path/to/project.json --install-missing
 ```
 
-The first run installs what the example models import (scipy, trimesh, optuna) into the dev site folder, through Blender's own Python. The panel is in the 3D view's sidebar, tab "proctune":
+Before starting Blender the launcher loads and builds the project with Blender's own Python and prints what is missing and where it looked; with `--install-missing` it installs what is missing, after saying where (the project's package folder, else the configured one, else Blender's). `python scripts/blender_site.py` installs what the example models and the tests need into the checkout's dev folder (`.blender-site`). The panel is in the 3D view's sidebar, tab "proctune":
 - sliders for every parameter, grouped as the parameter dataclasses are, and for every composite;
 - a curve widget for every curve parameter;
 - layer visibility toggles;

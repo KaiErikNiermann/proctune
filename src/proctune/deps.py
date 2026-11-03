@@ -20,7 +20,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from proctune.errors import MissingDependenciesError
+from proctune.errors import MissingDependenciesError, ProctuneError
 
 log = logging.getLogger("proctune.deps")
 
@@ -58,12 +58,84 @@ def missing(reqs: Iterable[Requirement]) -> tuple[Requirement, ...]:
     return tuple(r for r in reqs if importlib.util.find_spec(r.module) is None)
 
 
+@dataclass(frozen=True)
+class Environment:
+    """Where this Python looks for packages and where an install would go: what a missing-package report says, so
+    a setup proctune cannot guess (a venv, a custom Blender build) can be pointed at instead."""
+
+    python: str
+    version: str
+    """major.minor"""
+    searched: tuple[str, ...]
+    """The folders on the import path, in order"""
+    configured: tuple[str, ...]
+    """Folders added by the proctune config (``paths``)"""
+    target: str
+    """Where the Install button and `install_into_blender` would put packages"""
+    config: str
+
+    def lines(self) -> tuple[str, ...]:
+        out = [f"Python {self.version} at {self.python}", f"looked in {len(self.searched)} folders:"]
+        out += [f"  {p}" for p in self.searched]
+        out.append(f"would install into {self.target}")
+        out.append(f"config: {self.config}" + ("" if Path(self.config).exists() else " (not present)"))
+        return tuple(out)
+
+
+def default_target() -> Path:
+    """Where packages go unless told otherwise: the configured ``packages`` folder, else (in Blender) its user
+    ``scripts/modules``, else this Python's user site-packages."""
+    from proctune import config  # noqa: PLC0415
+
+    cfg = config.load()
+    if cfg.packages is not None:
+        return cfg.packages
+    if importlib.util.find_spec("bpy") is not None:
+        return blender_modules()
+    import site  # noqa: PLC0415
+
+    return Path(site.getusersitepackages())
+
+
+def environment() -> Environment:
+    from proctune import config  # noqa: PLC0415
+
+    searched = tuple(p for p in sys.path if p and Path(p).is_dir())
+    try:
+        configured = tuple(str(p) for p in config.load().paths)
+        target = str(default_target())
+    except ProctuneError as e:  # a broken config must not hide the report
+        configured, target = (), f"(unknown: {e.message})"
+    v = sys.version_info
+    return Environment(sys.executable, f"{v.major}.{v.minor}", searched, configured, target, str(config.config_path()))
+
+
+def version_mismatch(folder: Path) -> str | None:
+    """A site-packages folder made for another Python version than this one (its compiled packages will not load)."""
+    v = sys.version_info
+    for part in folder.parts:
+        if (
+            part.startswith("python")
+            and part[6:].replace(".", "").isdigit()
+            and part[6:] not in (f"{v.major}.{v.minor}", "")
+        ):
+            return (
+                f"{folder} is for Python {part[6:]}, this is {v.major}.{v.minor}: its compiled packages will not load"
+            )
+    return None
+
+
 def install_hint(packages: Iterable[str]) -> str:
+    """How to make packages importable, naming where this Python looked and where an install would go."""
     names = sorted(set(packages))
-    expr = f"from proctune import deps; deps.install_into_blender({names!r})"
+    env = environment()
+    src = str(Path(__file__).resolve().parents[1])  # where proctune itself is imported from
+    expr = f"import sys; sys.path.insert(0, {src!r}); from proctune import deps; deps.install_into_blender({names!r})"
     return (
-        "install them into Blender's Python: proctune panel > Install missing packages, or run "
-        f'`blender -b --python-expr "{expr}"`, or `python -m proctune.deps {" ".join(names)}` for plain Python'
+        f"Python {env.version} at {env.python} searched {len(env.searched)} folders (listed in the log). "
+        f"To use packages from your own environment, add its site-packages for Python {env.version} to `paths` in "
+        f"{env.config} (or PROCTUNE_PATHS). To install them into {env.target}: proctune panel > Install missing "
+        f'packages, or run `blender -b --python-expr "{expr}"`'
     )
 
 
@@ -71,6 +143,7 @@ def require(reqs: Iterable[Requirement], context: str) -> None:
     """Raise `MissingDependenciesError` naming every missing package and how to install it."""
     gone = missing(reqs)
     if gone:
+        log.warning("missing %s; %s", [r.package for r in gone], "\n".join(environment().lines()))
         what = ", ".join(f"{r.package} ({r.why})" if r.why else r.package for r in gone)
         raise MissingDependenciesError(
             f"{context} needs {what}", install_hint(r.package for r in gone), tuple(r.package for r in gone)
@@ -141,10 +214,10 @@ def install(packages: Iterable[str], target: Path, python: str | None = None) ->
 
 
 def blender_modules() -> Path:
-    """Blender's user ``scripts/modules`` (only inside Blender)."""
+    """Blender's user ``scripts/modules`` (only inside Blender; not created here: `install` creates its target)."""
     import bpy  # noqa: PLC0415
 
-    return Path(bpy.utils.user_resource("SCRIPTS", path="modules", create=True))
+    return Path(bpy.utils.user_resource("SCRIPTS", path="modules"))
 
 
 def ensure_on_path(target: Path) -> None:
@@ -153,12 +226,26 @@ def ensure_on_path(target: Path) -> None:
         sys.path.append(str(target))
 
 
-def install_into_blender(packages: Iterable[str]) -> InstallResult:
-    """Run inside Blender: install into the configured folder (`proctune.config`, ``packages``) or Blender's user
-    ``scripts/modules``."""
-    from proctune import config  # noqa: PLC0415
+def install_into_blender(packages: Iterable[str], target: Path | None = None) -> InstallResult:
+    """Run inside Blender: install into `target`, else the configured folder (`proctune.config`, ``packages``), else
+    Blender's user ``scripts/modules``."""
+    return install(packages, target or default_target())
 
-    return install(packages, config.load().packages or blender_modules())
+
+def add_paths(folders: Iterable[Path]) -> tuple[str, ...]:
+    """Put folders on the import path (after what is there, so the interpreter's own packages win); returns warnings
+    for folders that do not exist or are for another Python version."""
+    warnings: list[str] = []
+    for folder in folders:
+        if not folder.is_dir():
+            warnings.append(f"{folder} does not exist")
+            continue
+        if mismatch := version_mismatch(folder):
+            warnings.append(mismatch)
+        ensure_on_path(folder)
+    for w in warnings:
+        log.warning("%s", w)
+    return tuple(warnings)
 
 
 def main(argv: list[str] | None = None) -> int:
