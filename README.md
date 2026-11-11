@@ -9,6 +9,10 @@ Blender has the pieces (properties with update callbacks, timers, depsgraph hand
 - Geometry Nodes exposes node-group inputs as sliders and live-evaluates them, but the model has to be a node graph. [Geometry Script](https://github.com/carson-katri/geometry-script) and [Node To Python](https://extensions.blender.org/add-ons/node-to-python/) (both GPL-3.0) generate node graphs from Python, which helps only if the model fits Geometry Nodes.
 - Sculpt layer add-ons ([Sculpt Layers](https://superhivemarket.com/products/sculpt-layers), [Edit Layers](https://extensions.blender.org/add-ons/edit-layers/), GPL-3.0) keep sculpts across edits of a hand-made base mesh, not across a mesh that is regenerated from parameters. Blender Studio's own notes describe the [limits of that workflow](https://studio.blender.org/blog/layered-sculpting-for-einar/).
 
+### The main motivation 
+
+Basically just fine tuning procedural meshes, while actually seeing nice live changes.
+
 ## The idea
 
 Every generated mesh is an `Element` with a `Frame`: an origin, axes, and a scale measured in the element's own size (a bone's length along it, its radius across). Vertices are generated in those normalized coordinates, so "half way along" means the same at any length. Hand edits are stored in the same coordinates:
